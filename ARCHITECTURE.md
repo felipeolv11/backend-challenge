@@ -71,10 +71,53 @@ de uma transação.
 - **Por que um script próprio e não a CLI do MikroORM:** o script chama `orm.migrator` direto
   e roda igual no Windows e no Linux, sem configuração extra para a CLI rodar TypeScript no Bun.
 
-### 3.4 Schema, constraints e índices
+### 3.4 Mapeamento do `Money`
+
+| Onde | Representação | Exemplo |
+|---|---|---|
+| Contratos (API, fila, eventos) | `{ amount: string, currency: string }` | `{ "amount": "25.00", "currency": "BRL" }` |
+| Memória (`Money`) | `bigint` em centavos + `currency` | `2500n`, `"BRL"` |
+| PostgreSQL | coluna `NUMERIC(20,2)` + coluna `currency CHAR(3)` | `25.00`, `BRL` |
+
+O mapper lê o `NUMERIC` como string e passa por `Money.from()`, então o valor nunca vira `number`.
+
+**Memória: `bigint` em centavos.**
+- **Por quê:** inteiro exato e nativo, sem dependência. A escala é sempre 2 e o domínio só
+  soma e subtrai, então centavos inteiros cobrem tudo **sem nenhum arredondamento**.
+- **Alternativa descartada:** lib de decimal (`decimal.js`), sugerida pelo tipo `Decimal` do
+  esqueleto. Adicionaria uma dependência e exigiria configurar precisão e arredondamento que
+  nunca seriam usados. Além disso, ela aceita `"1e3"`, então a validação por regex seria
+  necessária de qualquer forma.
+
+**Banco: `NUMERIC(20,2)`.**
+- **Por quê:** decimal exato do PostgreSQL. O valor aparece legível no banco (`975.00`, igual à
+  API), e o `CHECK (balance >= 0)` e o `SUM()` da reconciliação ficam naturais.
+- **Alternativa descartada:** `BIGINT` em centavos. Evitaria uma conversão, mas no banco aparece
+  `97500`, e quem esquece que é centavo erra por 100x.
+- O limite de 18 dígitos inteiros do `NUMERIC(20,2)` também é validado no `Money.from()`. Assim,
+  um valor grande demais vira erro de validação, e não erro de banco (que seria confundido com
+  falha de infraestrutura).
+
+**Formato de entrada estrito: exatamente 2 casas** (regex `^(0|[1-9]\d*)\.\d{2}$`).
+- Rejeita `""`, `"NaN"`, `"Infinity"`, `"1e3"`, `"-25.00"`, `"25"`, `"25.5"`, `"25.001"`, `"007.00"` e
+  `amount` do tipo `number`.
+- **Por quê:** o enunciado diz "recebido sempre com escala fixa de 2 casas". E como `"25"` e
+  `"25.00"` teriam hashes de payload diferentes, aceitar os dois transformaria um reenvio legítimo
+  em conflito de idempotência.
+- **Alternativa descartada:** aceitar de 0 a 2 casas e normalizar. Exigiria normalizar antes do
+  hash de idempotência, mais um ponto de falha.
+
+**Negativos:** `Money.from()` rejeita valores negativos (contrato de entrada). Valores negativos
+só surgem de operações internas, como `negate()` ou a diferença da reconciliação, e são
+serializados com sinal (`"-0.05"`).
+
+**Moeda:** valida o formato ISO-4217 (3 letras maiúsculas). Operações entre moedas diferentes
+lançam `CurrencyMismatchError`. O projeto usa `BRL`, mas o modelo é multi-moeda.
+
+### 3.5 Schema, constraints e índices
 _(a definir na etapa do schema)_
 
-### 3.5 Conexão com o banco é "preguiçosa"
+### 3.6 Conexão com o banco é "preguiçosa"
 
 O MikroORM 7 só abre a conexão na primeira consulta. O serviço **sobe mesmo com o PostgreSQL
 fora do ar**, o que está de acordo com a seção 3 do enunciado ("PostgreSQL pode ficar

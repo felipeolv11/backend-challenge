@@ -3,7 +3,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "infra:up": "docker compose up -d --wait",
+    "infra:up": "docker compose up -d --wait postgres sqs && docker compose run --rm sqs-setup",
     "infra:down": "docker compose down",
     "start": "bun run src/main.ts",
     "start:dev": "bun --watch run src/main.ts",
@@ -13,9 +13,11 @@
     "typecheck": "bun check",
     "test": "bun test",
     "test:unit": "bun test test/unit",
-    "test:integration": "bun test test/integration"
+    "test:integration": "bun test test/integration",
+    "sqs:setup": "bun run src/infrastructure/sqs/setup-queues.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-sqs": "3.1159.0",
     "@mikro-orm/core": "7.2.5",
     "@mikro-orm/migrations": "7.2.5",
     "@mikro-orm/nestjs": "7.1.0",

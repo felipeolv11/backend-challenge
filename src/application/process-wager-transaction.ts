@@ -11,6 +11,7 @@ import { DuplicateRecordError, IdempotencyConflictError, InboxMessageConflictErr
 import { newId } from './ids';
 import { hashWagerPayload } from './payload-hash';
 import type { TransactionalRepositories, TransactionRunner } from './ports';
+import { PendingReferencePolicy } from './pending-reference-policy';
 import { WagerTransactionProcessor } from './wager-transaction-processor';
 
 /** Pedido vindo do provedor. É o mesmo formato para HTTP e fila (seção 10). */
@@ -47,9 +48,14 @@ export interface WagerTransactionResult {
  * inbox + transação + ledger + saldo + outbox. Ou tudo é confirmado, ou nada.
  */
 export class ProcessWagerTransaction {
-  private readonly processor = new WagerTransactionProcessor();
+  private readonly processor: WagerTransactionProcessor;
 
-  constructor(private readonly runner: TransactionRunner) {}
+  constructor(
+    private readonly runner: TransactionRunner,
+    pendingReferencePolicy = new PendingReferencePolicy(),
+  ) {
+    this.processor = new WagerTransactionProcessor(pendingReferencePolicy);
+  }
 
   async execute(command: WagerTransactionCommand, context: ProcessingContext): Promise<WagerTransactionResult> {
     // Validação do payload ANTES de abrir transação no banco: payload inválido não é gravado
@@ -134,6 +140,33 @@ export class ProcessWagerTransaction {
     }
 
     return toResult(transaction, false);
+  }
+
+  /**
+   * Registra a transação como FAILED (PROCESSING_ERROR) depois de esgotar as tentativas por erro
+   * de infraestrutura. Fica auditável e, a partir daí, um reenvio devolve o mesmo FAILED (terminal).
+   * Se já existe algo gravado para a key, não faz nada e devolve o que existe.
+   * É "melhor esforço": se o banco continuar fora, isto também falha e a mensagem vai para a DLQ
+   * do mesmo jeito.
+   */
+  async recordFailure(command: WagerTransactionCommand, context: ProcessingContext): Promise<WagerTransactionResult> {
+    const props = this.toCreateProps(command, hashWagerPayload(command));
+    return this.runner.run(async (repositories) => {
+      const existing =
+        (await repositories.transactions.findByIdempotencyKey(props.providerId, props.idempotencyKey)) ??
+        (await repositories.transactions.findByExternalId(props.providerId, props.externalTransactionId));
+      if (existing) {
+        return toResult(existing, true);
+      }
+
+      const transaction = WagerTransaction.create(props);
+      transaction.fail(FailureCode.ProcessingError);
+      await repositories.transactions.insert(transaction);
+      if (context.inbox && !(await repositories.inbox.find(context.inbox.consumerName, context.inbox.messageId))) {
+        await this.recordInbox(repositories, context, new Date());
+      }
+      return toResult(transaction, false);
+    });
   }
 
   private async recordInbox(repositories: TransactionalRepositories, context: ProcessingContext, now: Date): Promise<void> {

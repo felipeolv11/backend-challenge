@@ -32,8 +32,10 @@ export interface WagerTransactionRepository {
   /** Reversão (REFUND/ROLLBACK) PROCESSED que aponta para a transação informada, se existir. */
   findProcessedReversalOf(referenceTransactionId: string): Promise<WagerTransaction | undefined>;
   insert(transaction: WagerTransaction): Promise<void>;
-  /** Grava os campos de resultado (status, failureCode, referência, balanceAfter, processedAt). */
+  /** Grava os campos de resultado (status, failureCode, referência, balanceAfter, processedAt, tentativas). */
   updateOutcome(transaction: WagerTransaction): Promise<void>;
+  /** Ids das transações PENDING_REFERENCE cuja próxima tentativa já venceu. */
+  findDuePendingReferenceIds(now: Date, limit: number): Promise<string[]>;
 }
 
 export interface LedgerRepository {
@@ -57,6 +59,19 @@ export interface InboxRepository {
 
 export interface OutboxRepository {
   insert(message: OutboxMessage): Promise<void>;
+  /**
+   * Pega e TRAVA um lote de mensagens pendentes e vencidas (SELECT ... FOR UPDATE SKIP LOCKED).
+   * Outra instância rodando ao mesmo tempo pula as linhas travadas e pega outras: dois
+   * publishers nunca publicam a mesma mensagem ao mesmo tempo.
+   */
+  claimDue(now: Date, limit: number): Promise<OutboxMessage[]>;
+  /** Grava publishedAt, attempts e nextAttemptAt. */
+  update(message: OutboxMessage): Promise<void>;
+}
+
+/** Porta de publicação dos eventos (implementada com SQS). */
+export interface EventPublisher {
+  publish(message: OutboxMessage): Promise<void>;
 }
 
 /** Repositórios que trabalham DENTRO da mesma transação SQL. */

@@ -26,5 +26,20 @@ services:
     ports:
       - "4566:4566"
 
+  # Serviço de uma execução só: cria as filas (idempotente) e termina.
+  # Roda o mesmo script de `bun run sqs:setup`, dentro de um container do Bun.
+  sqs-setup:
+    image: oven/bun:1.4.4
+    working_dir: /app
+    volumes:
+      - .:/app
+    environment:
+      SQS_ENDPOINT: http://sqs:4566
+    command: ["bun", "run", "src/infrastructure/sqs/setup-queues.ts"]
+    depends_on:
+      sqs:
+        condition: service_healthy
+    restart: "no"
+
 volumes:
   postgres-data:

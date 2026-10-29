@@ -130,7 +130,11 @@ describe('migrations', () => {
 describe('migration 2: wallet_version no ledger', () => {
   test('faz backfill dos lançamentos existentes na ordem dos ids, e o trigger volta ligado', async () => {
     // Volta para o schema da migration 1 (sem wallet_version) e grava lançamentos "antigos".
-    await orm.migrator.down();
+    await orm.migrator.down({ to: 'Migration20261029120000_initial_schema' });
+    const [columns] = await sql(
+      `SELECT count(*)::int AS total FROM information_schema.columns WHERE table_name = 'wallet_ledger_entries' AND column_name = 'wallet_version'`,
+    );
+    expect(columns!.total).toBe(0); // confirma que voltou mesmo para o schema sem wallet_version
     const walletId = await insertWallet({ balance: '70.00' });
     const ids: string[] = [];
     const oldEntries = [

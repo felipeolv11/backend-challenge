@@ -153,8 +153,10 @@ describe('WagerTransaction — transições de estado', () => {
 
   test('PENDING → PENDING_REFERENCE → PROCESSED', () => {
     const tx = WagerTransaction.create(props({ kind: Kind.Refund, referenceExternalTransactionId: 'bet-1' }));
-    tx.markPendingReference();
+    tx.markPendingReference(at);
     expect(tx.status).toBe(Status.PendingReference);
+    expect(tx.referenceAttempts).toBe(0);
+    expect(tx.nextReferenceAttemptAt).toEqual(at);
     expect(tx.isTerminal()).toBe(false);
     tx.markProcessed('tx-bet-1', at, brl('100.00'));
     expect(tx.status).toBe(Status.Processed);
@@ -162,22 +164,34 @@ describe('WagerTransaction — transições de estado', () => {
 
   test('PENDING_REFERENCE → REJECTED (ex.: referência nunca chegou)', () => {
     const tx = WagerTransaction.create(props({ kind: Kind.Refund, referenceExternalTransactionId: 'bet-1' }));
-    tx.markPendingReference();
+    tx.markPendingReference(at);
     tx.reject(FailureCode.ReferenceNotFound);
     expect(tx.status).toBe(Status.Rejected);
   });
 
   test('PENDING_REFERENCE → PENDING_REFERENCE não é transição válida', () => {
     const tx = WagerTransaction.create(props({ kind: Kind.Refund, referenceExternalTransactionId: 'bet-1' }));
-    tx.markPendingReference();
-    expect(() => tx.markPendingReference()).toThrow(InvalidTransactionStateError);
+    tx.markPendingReference(at);
+    expect(() => tx.markPendingReference(at)).toThrow(InvalidTransactionStateError);
+  });
+
+  test('scheduleReferenceRetry conta a tentativa e reagenda; só vale em PENDING_REFERENCE', () => {
+    const tx = WagerTransaction.create(props({ kind: Kind.Refund, referenceExternalTransactionId: 'bet-1' }));
+    expect(() => tx.scheduleReferenceRetry(at)).toThrow(InvalidTransactionStateError);
+    tx.markPendingReference(at);
+    const later = new Date(at.getTime() + 4_000);
+    tx.scheduleReferenceRetry(later);
+    expect(tx.referenceAttempts).toBe(1);
+    expect(tx.nextReferenceAttemptAt).toEqual(later);
+    tx.markProcessed('ref', later, brl('1.00'));
+    expect(tx.nextReferenceAttemptAt).toBeUndefined(); // terminal: não há mais o que agendar
   });
 
   // Toda combinação de (estado terminal) x (transição) precisa lançar erro e não mudar nada.
   const terminalStatuses = [Status.Processed, Status.Rejected, Status.Failed];
   const transitions: Record<string, (tx: WagerTransaction) => void> = {
     markProcessed: (tx) => tx.markProcessed(undefined, at, brl('1.00')),
-    markPendingReference: (tx) => tx.markPendingReference(),
+    markPendingReference: (tx) => tx.markPendingReference(at),
     reject: (tx) => tx.reject(FailureCode.InsufficientFunds),
     fail: (tx) => tx.fail(FailureCode.ProcessingError),
   };

@@ -100,7 +100,7 @@ describe('WagerTransactionProcessed / Rejected / PendingReference', () => {
 
   test('PendingReference leva a referência que está faltando', () => {
     const tx = newTx(WagerTransactionKind.Refund, 'bet-ext-99');
-    tx.markPendingReference();
+    tx.markPendingReference(at);
     const event = WagerTransactionPendingReference.from(tx, ctx('evt-3'));
     expect(event.eventType).toBe('WagerTransactionPendingReference');
     expect(event.data.referenceExternalTransactionId).toBe('bet-ext-99');

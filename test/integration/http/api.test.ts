@@ -13,7 +13,8 @@ let baseUrl: string;
 
 beforeAll(async () => {
   orm = await createTestOrm(); // recria o schema do banco de teste
-  app = await createApp({ clientUrl: testDatabaseUrl() });
+  // Workers desligados: aqui o foco é a API. Os workers têm testes próprios.
+  app = await createApp({ orm: { clientUrl: testDatabaseUrl() }, workers: { sqsConsumer: false, outboxPublisher: false, pendingReferenceWorker: false } });
   await app.listen(0); // porta livre qualquer
   baseUrl = await app.getUrl();
 });

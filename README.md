@@ -16,9 +16,25 @@ com correção sob concorrência, idempotência persistente e mensageria confiá
 ```bash
 bun install
 cp .env.example .env          # no PowerShell: Copy-Item .env.example .env
-bun run infra:up              # sobe PostgreSQL e SQS (MiniStack) e espera ficarem saudáveis
+bun run infra:up              # sobe PostgreSQL e SQS (MiniStack) e cria as filas
 bun run migration:up          # cria o schema
 bun run start                 # sobe a API em http://localhost:3000
+```
+
+## O que roda dentro do processo
+
+Além da API HTTP, cada instância roda três workers em segundo plano (cada um pode ser desligado
+por variável de ambiente, ver `.env.example`):
+
+- **Consumidor SQS** (`wager-transactions.fifo`): mesmo caso de uso da API, inbox, retry com
+  backoff e DLQ (`wager-transactions-dlq.fifo`);
+- **Publisher da outbox**: publica os eventos de integração em `wager-events.fifo`;
+- **Worker de PENDING_REFERENCE**: tenta de novo as transações que esperam a referência.
+
+Para enviar uma transação pela fila (formato da seção 10 do enunciado):
+
+```bash
+aws --endpoint-url http://localhost:4566 sqs send-message   --queue-url http://localhost:4566/000000000000/wager-transactions.fifo   --message-group-id <walletId> --message-deduplication-id msg-123   --message-body '{"messageId":"msg-123","type":"WagerTransactionRequested","occurredAt":"2026-07-29T15:00:00.000Z","data":{...}}'
 ```
 
 ## API
@@ -47,7 +63,8 @@ idempotência · 422 rejeitada por regra de negócio (`failureCode` no corpo) ·
 
 | Comando | O que faz |
 |---|---|
-| `bun run infra:up` / `infra:down` | Sobe / derruba PostgreSQL e SQS |
+| `bun run infra:up` / `infra:down` | Sobe PostgreSQL e SQS e cria as filas / derruba tudo |
+| `bun run sqs:setup` | Cria as filas SQS (idempotente) |
 | `bun run start` | Sobe a aplicação |
 | `bun run start:dev` | Sobe a aplicação recarregando a cada alteração |
 | `bun run migration:up` | Aplica as migrations pendentes |

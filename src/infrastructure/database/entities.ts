@@ -50,6 +50,8 @@ export const WagerTransactionRecord = defineEntity({
     failureCode: p.string().nullable(),
     balanceAfter: p.decimal().nullable(),
     processedAt: p.datetime().nullable(),
+    referenceAttempts: p.integer(),
+    nextReferenceAttemptAt: p.datetime().nullable(),
     createdAt: p.datetime(),
     updatedAt: p.datetime(),
   },

@@ -199,7 +199,51 @@ e não descarta nada em silêncio.
 - **Alternativa descartada:** ignorar como duplicata. Uma operação legítima com conteúdo novo
   seria descartada sem ninguém saber.
 
-_(Consumidor, retry e DLQ: a definir na etapa do SQS.)_
+**Filas** (criadas pelo script idempotente `bun run sqs:setup`, que também roda como serviço
+de uma execução só no Docker Compose):
+
+| Fila | Para quê |
+|---|---|
+| `wager-transactions.fifo` | Entrada das transações. `RedrivePolicy` com `maxReceiveCount = 6` |
+| `wager-transactions-dlq.fifo` | Mensagens que não podem ser processadas |
+| `wager-events.fifo` | Saída dos eventos de integração (publisher da outbox) |
+
+- **Por que um script e não a aplicação criando as filas:** criar fila é infraestrutura (em
+  produção seria Terraform); a aplicação normalmente não tem essa permissão.
+- **Recomendação ao produtor:** `MessageGroupId = walletId`. Assim o FIFO entrega em ordem por
+  wallet, o que é uma **otimização**: a correção é garantida pelo banco, mesmo fora de ordem.
+
+**Consumidor** (`src/infrastructure/sqs/wager-transaction-consumer.ts`):
+- Usa **o mesmo caso de uso** do HTTP (`ProcessWagerTransaction`), com o registro de inbox na
+  mesma transação SQL.
+- **ack somente após o commit:** `DeleteMessage` só é chamado depois que `execute()` retorna, e
+  fica **fora** do `try` do processamento. Se o ack falhar, a mensagem volta sozinha (visibility
+  timeout) e a inbox devolve o replay, sem efeito duplicado.
+- Mensagens de um lote são tratadas **em sequência** (ordem dentro do grupo FIFO). O paralelismo
+  vem de várias instâncias e grupos diferentes.
+
+| Tipo de erro | Exemplos | Ação |
+|---|---|---|
+| Negócio | REJECTED (sem saldo, referência inválida...) | Não é erro: o resultado está gravado. **ack** |
+| Transitório | Banco fora, `lock_timeout`, rede, erro inesperado | `ChangeMessageVisibility` com backoff **2s, 4s, 8s, 16s** (teto de 60s) |
+| Transitório na 5ª tentativa | idem | Grava a transação como **FAILED** (`PROCESSING_ERROR`, auditável) e manda para a **DLQ** (`MAX_ATTEMPTS_EXCEEDED`) |
+| Permanente | JSON inválido, fora do contrato, payload inválido, conflito de idempotência, mesmo messageId com outro conteúdo | **DLQ na hora**, com o motivo em `MessageAttributes` |
+
+- **Por que backoff pela visibilidade e não só a RedrivePolicy:** com a RedrivePolicy pura, o
+  intervalo seria sempre o mesmo, erro permanente gastaria todas as tentativas e não existiria o
+  registro FAILED auditável. A RedrivePolicy (6) fica como **rede de segurança**, para o caso do
+  processo morrer em loop numa mensagem.
+- **Ida para a DLQ:** copia para a DLQ e depois apaga da fila principal. Se morrer no meio, a
+  mensagem volta e vai para a DLQ de novo; o `MessageDeduplicationId` evita a cópia repetida.
+- **SIGTERM:** `enableShutdownHooks` + `beforeApplicationShutdown`. O consumidor para de pegar
+  mensagens (aborta o long polling), **termina a mensagem em andamento** (commit + ack) e devolve a
+  visibilidade das que ainda não começou (`VisibilityTimeout = 0`), para outra instância pegar
+  na hora. Isso roda **antes** de o NestJS fechar o banco.
+
+**Testado contra o SQS real** (`test/integration/messaging/sqs-consumer.test.ts`): duplicata,
+**worker morto depois do commit e antes do ack** (redelivery real após o visibility timeout, sem
+débito duplo), DLQ para cada tipo de erro permanente, retry com backoff, FAILED + DLQ no limite
+e parada graciosa.
 
 ### 4.3 Transactional Outbox
 
@@ -231,6 +275,47 @@ string, datas ISO-8601, `null` em vez de `undefined` para o formato ser estável
 Cada factory `from()` confere o estado da origem (ex.: `WagerTransactionProcessed` exige transação
 `PROCESSED`; `WalletBalanceChanged` exige que o lançamento corresponda ao saldo atual da wallet).
 Criar evento a partir de estado errado é bug (`InvalidEventSourceError`).
+
+**Publisher** (`src/application/publish-outbox.ts` + `SqsEventPublisher`):
+- Pega um lote com `SELECT ... FOR UPDATE SKIP LOCKED`, publica, marca `published_at` e faz
+  commit, numa transação. **Vários publishers concorrentes** dividem o trabalho: um pula as linhas
+  travadas pelo outro. Testado: dois publishers simultâneos, cada evento publicado **exatamente uma vez**.
+- Publica em `wager-events.fifo` com `MessageGroupId = walletId` (ordem por wallet) e
+  `MessageDeduplicationId = eventId`.
+- **Cenário da seção 11** (testado): commit feito → processo morre antes de publicar → outra
+  instância publica. E se morrer **depois** de publicar e **antes** de marcar: o evento é
+  republicado com o **mesmo `eventId`**. O SQS FIFO descarta a cópia em 5 minutos (otimização) e o
+  consumidor deve deduplicar pelo `eventId` (garantia).
+- **Alternativa descartada:** reserva por coluna `locked_until` (lease), que adicionaria mais
+  estados sem ganho aqui.
+- **Trade-off:** a transação fica aberta durante a chamada ao SQS (o lote é pequeno: 10). E a
+  ordem entre eventos da mesma wallet é **best-effort**: se um evento falhar e o seguinte não, o
+  seguinte pode sair antes. Por isso o `WalletBalanceChanged` leva `walletVersion`, e o
+  consumidor pode ordenar por ela.
+
+### 4.4 Workers em segundo plano
+
+Os três workers (consumidor SQS, publisher da outbox e worker de PENDING_REFERENCE) rodam
+**dentro do processo da API** e podem ser desligados por variável de ambiente
+(`ENABLE_SQS_CONSUMER`, `ENABLE_OUTBOX_PUBLISHER`, `ENABLE_PENDING_REFERENCE_WORKER`).
+Com N instâncias, há N de cada, e o banco garante que não se atrapalham. A subida da API não
+espera o SQS: as filas são procuradas em segundo plano até aparecerem. Quando um lote vem cheio, o
+worker roda de novo na hora, sem esperar o intervalo.
+
+### 4.5 Referências fora de ordem (worker de PENDING_REFERENCE, seção 7.1)
+
+- Transação com referência ausente (ou ainda não terminal) fica `PENDING_REFERENCE`, com
+  `reference_attempts` e `next_reference_attempt_at` (migration 3).
+- O worker busca as vencidas e trata cada uma numa transação: **trava a wallet** (mesma ordem de
+  lock do caso de uso, sem deadlock), **relê** a transação (outra instância pode ter tratado) e
+  reaproveita a decisão do `WagerTransactionProcessor`.
+- **Limite: 10 novas tentativas, backoff 2s, 4s, 8s... com teto de 5 min (cerca de 18 minutos no
+  total).** Referências fora de ordem costumam chegar em segundos; 18 minutos cobrem atrasos longos
+  sem deixar a transação pendurada por horas. Configurável por variável de ambiente.
+  Alternativa descartada: TTL fixo sem backoff, que consulta o banco no mesmo ritmo o tempo todo.
+- Esgotou: `REJECTED` com `REFERENCE_NOT_FOUND` e evento `WagerTransactionRejected`.
+- Testado: REFUND antes da BET, ROLLBACK antes do WIN, esgotamento do limite e **3 workers
+  simultâneos** sobre a mesma pendente (processada uma vez só).
 
 ---
 

@@ -12,6 +12,7 @@ import { type WagerTransaction, WagerTransactionKind, WagerTransactionStatus } f
 import type { Wallet } from '../domain/wallet';
 import { LedgerDirection, type WalletLedgerEntry } from '../domain/wallet-ledger-entry';
 import { newId } from './ids';
+import { PendingReferencePolicy } from './pending-reference-policy';
 import type { TransactionalRepositories } from './ports';
 
 /** Dados para montar o contexto dos eventos (rastreabilidade). */
@@ -36,6 +37,8 @@ export interface ProcessingOutcome {
  * Pré-condição: a wallet já foi carregada com lock (SELECT ... FOR UPDATE) na mesma transação SQL.
  */
 export class WagerTransactionProcessor {
+  constructor(private readonly pendingReferencePolicy = new PendingReferencePolicy()) {}
+
   async decide(
     repositories: TransactionalRepositories,
     transaction: WagerTransaction,
@@ -75,7 +78,7 @@ export class WagerTransactionProcessor {
       if (!reference || !reference.isTerminal()) {
         // Se já estava esperando (chamada pelo worker), não há transição nem evento novo.
         if (transaction.status === WagerTransactionStatus.Pending) {
-          transaction.markPendingReference();
+          transaction.markPendingReference(this.pendingReferencePolicy.nextAttemptAt(now, 1));
           outcome.events.push(WagerTransactionPendingReference.from(transaction, eventContext()));
         }
         return outcome;

@@ -312,6 +312,8 @@ describe('atomicidade: transação, ledger, saldo, outbox e inbox são gravados 
               insert: async () => {
                 throw new Error('simulated outbox failure');
               },
+              claimDue: (now, limit) => repositories.outbox.claimDue(now, limit),
+              update: (message) => repositories.outbox.update(message),
             },
           }),
         ),

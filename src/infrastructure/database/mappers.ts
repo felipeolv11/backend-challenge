@@ -62,6 +62,8 @@ export function toWagerTransaction(row: WagerTransactionRow): WagerTransaction {
     failureCode: orUndefined(row.failureCode) as FailureCode | undefined,
     processedAt: orUndefined(row.processedAt),
     balanceAfter: row.balanceAfter ? money(row.balanceAfter, row.currency) : undefined,
+    referenceAttempts: row.referenceAttempts,
+    nextReferenceAttemptAt: orUndefined(row.nextReferenceAttemptAt),
   });
 }
 
@@ -85,6 +87,8 @@ export function wagerTransactionToRow(transaction: WagerTransaction, updatedAt: 
     failureCode: transaction.failureCode ?? null,
     balanceAfter: transaction.balanceAfter?.toJSON().amount ?? null,
     processedAt: transaction.processedAt ?? null,
+    referenceAttempts: transaction.referenceAttempts,
+    nextReferenceAttemptAt: transaction.nextReferenceAttemptAt ?? null,
     createdAt: transaction.createdAt,
     updatedAt,
   };

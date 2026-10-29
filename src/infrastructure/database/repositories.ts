@@ -22,6 +22,7 @@ import {
   outboxMessageToRow,
   toInboxMessage,
   toLedgerEntry,
+  toOutboxMessage,
   toWagerTransaction,
   toWallet,
   walletToRow,
@@ -113,9 +114,20 @@ export class MikroOrmWagerTransactionRepository implements WagerTransactionRepos
         referenceTransactionId: row.referenceTransactionId,
         balanceAfter: row.balanceAfter,
         processedAt: row.processedAt,
+        referenceAttempts: row.referenceAttempts,
+        nextReferenceAttemptAt: row.nextReferenceAttemptAt,
         updatedAt: row.updatedAt,
       },
     );
+  }
+
+  async findDuePendingReferenceIds(now: Date, limit: number): Promise<string[]> {
+    const rows = await this.em.find(
+      WagerTransactionRecord,
+      { status: 'PENDING_REFERENCE', nextReferenceAttemptAt: { $lte: now } },
+      { ...readOptions, fields: ['id'], orderBy: { nextReferenceAttemptAt: 'asc' }, limit },
+    );
+    return rows.map((row) => row.id);
   }
 }
 
@@ -169,6 +181,33 @@ export class MikroOrmOutboxRepository implements OutboxRepository {
 
   async insert(message: OutboxMessage): Promise<void> {
     await this.em.insert(OutboxMessageRecord, outboxMessageToRow(message));
+  }
+
+  async claimDue(now: Date, limit: number): Promise<OutboxMessage[]> {
+    // SKIP LOCKED: linhas travadas por outro publisher são puladas (não espera, não duplica).
+    const rows = await this.em.execute(
+      `SELECT id FROM outbox_messages
+        WHERE published_at IS NULL AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+        ORDER BY occurred_at, id
+        LIMIT ?
+        FOR UPDATE SKIP LOCKED`,
+      [now, limit],
+    );
+    if (rows.length === 0) return [];
+    const records = await this.em.find(
+      OutboxMessageRecord,
+      { id: { $in: rows.map((row) => row.id as string) } },
+      { ...readOptions, orderBy: { occurredAt: 'asc', id: 'asc' } },
+    );
+    return records.map(toOutboxMessage);
+  }
+
+  async update(message: OutboxMessage): Promise<void> {
+    await this.em.nativeUpdate(
+      OutboxMessageRecord,
+      { id: message.id },
+      { attempts: message.attempts, nextAttemptAt: message.nextAttemptAt ?? null, publishedAt: message.publishedAt ?? null },
+    );
   }
 }
 

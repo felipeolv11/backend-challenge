@@ -1,7 +1,8 @@
 # Arquitetura — Distributed Wagering Processor
 
 Este documento registra as decisões técnicas, os trade-offs e as limitações do projeto.
-Ele é atualizado a cada etapa. As seções ainda vazias estão marcadas como _(a definir)_.
+Cada decisão traz o **porquê** e a **alternativa descartada**. No código, os pontos de decisão
+têm comentários no formato `DECISÃO / POR QUÊ / ALTERNATIVA`.
 
 ---
 
@@ -14,6 +15,21 @@ fora de ordem ou processadas ao mesmo tempo por várias instâncias.
 **Princípio central:** o banco de dados (PostgreSQL) é a fonte da verdade. Constraints,
 locks e transações do banco garantem as invariantes. O código da aplicação e o SQS
 são a primeira linha de defesa, mas não a garantia final.
+
+### Resumo: onde está cada garantia
+
+| Requisito | Como é garantido | Seção |
+|---|---|---|
+| Dinheiro exato (nunca `number`) | `Money` com `bigint` em centavos; `NUMERIC(20,2)` no banco; entrada estrita com 2 casas | 3.4 |
+| Saldo nunca negativo | `Wallet.debit()` + `WalletLedgerEntry.create()` + `CHECK` no banco | 7.1, 3.5 |
+| Sem lost update / débito duplicado | `SELECT ... FOR UPDATE` por wallet + `UPDATE ... WHERE version = ?` + `UNIQUE (wallet_id, wallet_version)` no ledger | 5 |
+| Saldo ⇄ ledger | `debit`/`credit` sempre devolvem o lançamento; tudo numa transação SQL; reconciliação | 7.1, 8.4 |
+| Ledger imutável | Triggers que recusam UPDATE/DELETE/TRUNCATE | 3.5 |
+| Idempotência persistente | `UNIQUE (provider_id, idempotency_key)`, hash SHA-256 do JSON canônico, replay com o resultado original | 6 |
+| Inbox, outbox e saldo atômicos | Uma transação SQL só (`em.transactional`) | 5.3, 4.3 |
+| Evento só depois do commit | Transactional Outbox + publisher com `SKIP LOCKED` | 4.3 |
+| Uma reversão por referência | Índice único parcial (interpretação da regra 4) | 7.3 |
+| Várias instâncias | Tudo acima vale entre processos; provado com 3 processos e queda com kill -9 | 11 |
 
 ---
 
@@ -42,8 +58,10 @@ src/
 ### 3.1 ORM: MikroORM
 
 - **Por quê:** é o ORM preferencial do enunciado. `em.transactional()` garante atomicidade
-  entre wallet, ledger, inbox e outbox. `LockMode` permite `SELECT ... FOR UPDATE`. O Unit of Work
-  acumula as mudanças e grava tudo num commit só.
+  entre wallet, ledger, inbox e outbox, e `LockMode` permite `SELECT ... FOR UPDATE`.
+- **Unit of Work:** o recurso existe, mas as gravações financeiras usam **comandos explícitos**
+  (`em.insert` / `em.nativeUpdate`) dentro do `em.transactional()`, para a ordem das gravações e a
+  checagem da `version` ficarem visíveis no código (ver §6.1).
 - **Alternativa descartada:** TypeORM. É aceito, mas é mais fácil gravar algo fora da transação
   por esquecer de usar o `manager` dela.
 
@@ -62,6 +80,12 @@ de domínio usando a factory `rehydrate()` (seção 6.0 do enunciado).
 Migrations versionadas do MikroORM com `up()` e `down()` em SQL puro, executadas por um script
 próprio (`bun run migration:up | migration:down | migration:status`). Cada migration roda dentro
 de uma transação.
+
+| Migration | O que faz |
+|---|---|
+| `Migration20261029120000_initial_schema` | Tabelas, constraints, índices e triggers de imutabilidade |
+| `Migration20261029180000_ledger_wallet_version` | `wallet_version` no ledger + `UNIQUE (wallet_id, wallet_version)`, com backfill (ver §5.1) |
+| `Migration20261029200000_pending_reference_retry` | Controle de novas tentativas de `PENDING_REFERENCE` (ver §4.5) |
 
 - **Por quê:** as garantias de unicidade, imutabilidade e não-negatividade precisam estar
   **no schema** (seção 5, item 9). Isso exige CHECK constraints e triggers, que o gerador
@@ -116,8 +140,7 @@ lançam `CurrencyMismatchError`. O projeto usa `BRL`, mas o modelo é multi-moed
 
 ### 3.5 Schema, constraints e índices
 
-Migration: `src/infrastructure/database/migrations/Migration20261029120000_initial_schema.ts`.
-Cada garantia abaixo é testada em `test/integration/database/schema.test.ts` **com SQL direto no
+Migrations em `src/infrastructure/database/migrations/` (lista na §3.3). Cada garantia abaixo é testada em `test/integration/database/schema.test.ts` **com SQL direto no
 PostgreSQL real**, sem passar pelo domínio: o banco recusa sozinho.
 
 | Garantia (seção 6) | Onde está no banco |
@@ -135,7 +158,7 @@ PostgreSQL real**, sem passar pelo domínio: o banco recusa sozinho.
 | Dados do pedido imutáveis | trigger `wager_tx_guard_update` |
 | Transações e wallets não são apagadas | triggers `wager_tx_no_delete`, `wager_tx_no_truncate`, `wallets_no_delete` |
 | Inbox: dedup por `(consumer, messageId)` | `inbox_messages_pkey` |
-| Coerência status ⇄ campos | `wager_tx_failure_code_iff_failed`, `wager_tx_processed_at_iff_processed`, `wager_tx_processed_has_balance_after` |
+| Coerência status ⇄ campos | `wager_tx_failure_code_iff_failed`, `wager_tx_processed_at_iff_processed`, `wager_tx_processed_has_balance_after`, `wager_tx_pending_reference_is_scheduled` (migration 3: transação pendente sempre tem a próxima tentativa agendada) |
 | Taxonomia fechada | `wager_tx_kind_valid`, `wager_tx_status_valid`, `wager_tx_failure_code_valid` |
 
 **Decisões do schema:**
@@ -183,6 +206,7 @@ temporariamente indisponível"). A indisponibilidade é sinalizada pelo `GET /he
 - **Por quê:** o enunciado aceita LocalStack ou MiniStack. Desde março de 2026, o LocalStack exige
   conta e auth token, então o avaliador também precisaria de um. Com o MiniStack, basta
   `docker compose up`.
+- **Versão fixada:** imagem `ministackorg/ministack:1.5.34`.
 - **Risco e mitigação:** é um projeto novo. Antes de adotá-lo, validei com o SDK oficial da AWS:
   filas FIFO, deduplicação, ordem por `MessageGroupId`, `ApproximateReceiveCount` e redrive
   para a DLQ. Tudo funcionou.
@@ -259,7 +283,7 @@ republicação usa o mesmo id, e o consumidor deduplica por ele.
 - **Alternativa descartada:** limite de tentativas e evento "dead". Um SQS fora do ar por algumas
   horas estacionaria eventos válidos, que dependeriam de reprocessamento manual.
 - **Sem jitter:** cálculo determinístico, fácil de testar. Publishers concorrentes não disputam o
-  mesmo evento porque travam as linhas que pegam _(etapa do worker)_.
+  mesmo evento porque travam as linhas que pegam (`SKIP LOCKED`, ver "Publisher" abaixo).
 
 **Eventos (`IntegrationEvent<T>`):** classe abstrata com o envelope do enunciado e uma subclasse
 por evento. `eventType` e `version` ficam **no tipo**. `data` só tem tipos JSON (`MoneyProps` como
@@ -454,7 +478,7 @@ um dado inconsistente no banco deve ser **detectado pela reconciliação**, não
 
 **Defesa em camadas contra saldo negativo:** (1) `Wallet.debit()` checa o saldo; (2)
 `WalletLedgerEntry.create()` recusa `balanceAfter` negativo; (3) `CHECK (balance >= 0)` no banco
-_(etapa do schema)_. Um teste de mutação (remover a checagem 1) confirmou que a camada 2 segura
+(§3.5). Um teste de mutação (remover a checagem 1) confirmou que a camada 2 segura
 o saldo e que os testes detectam a regressão.
 
 ### 7.2 `WagerTransaction`: estados e transições
@@ -496,7 +520,7 @@ recebem valores fixos (`providerId = "internal"`, `externalTransactionId = "open
    (+80) **e** um ROLLBACK (+80): crédito duplicado, que é falha eliminatória. Por isso cada
    transação pode ser revertida **uma única vez**, por REFUND ou por ROLLBACK. Encadear continua
    permitido: `BET → REFUND → ROLLBACK do REFUND`. Garantia no banco: índice único parcial em
-   `reference_transaction_id` para reversões `PROCESSED` _(etapa do schema)_.
+   `reference_transaction_id` para reversões `PROCESSED` (`wager_tx_one_reversal_per_reference`, §3.5).
 2. **Referência opcional de WIN/LOSS é validada quando vier.** Mesmas regras de contexto (provider,
    player, wallet, moeda e rodada) e deve apontar para uma `BET`. Se a BET ainda não chegou, o WIN
    fica `PENDING_REFERENCE`: um prêmio nunca é pago antes da aposta existir. O valor do WIN pode ser
@@ -577,8 +601,9 @@ próxima página sem `COUNT`.
 
 `POST /wallets/:id/reconciliation` trava a wallet (para ler saldo e ledger no mesmo instante), soma
 créditos e débitos **no banco** (NUMERIC, exato) e compara. Divergência é **sinalizada**
-(`consistent: false`, `difference`) e **não é corrigida**. O aviso para log e métrica é feito por um
-listener (`DivergenceListener`) _(log estruturado e métrica: etapa de observabilidade)_.
+(`consistent: false`, `difference`) e **não é corrigida**. Cada divergência gera um log de alerta
+(`reconciliation_divergence`) e incrementa a métrica `wagering_reconciliation_divergences_total`,
+por meio de um listener (`DivergenceListener`) ligado no `app.module.ts`.
 
 ## 9. Observabilidade
 
@@ -689,4 +714,49 @@ queda e foram processados, e **todo evento confirmado no banco chegou à fila de
 3 instâncias da aplicação (portas 3000 a 3002), usando o `Dockerfile` (imagem do Bun, sem build).
 
 ## 12. Limitações conhecidas
-_(a definir)_
+
+Limitações assumidas conscientemente, com o que eu faria a seguir.
+
+**Domínio e dinheiro**
+- **Escala fixa de 2 casas para todas as moedas.** Moedas com 0 ou 3 casas (JPY, KWD) exigiriam a
+  escala por moeda (tabela ISO-4217). A moeda é validada só pelo formato (3 letras maiúsculas).
+- **Sem reversão parcial** (fora de escopo pelo enunciado). Consequência: o ROLLBACK de um WIN de
+  0.00 não é possível, porque não há nada a desfazer.
+- **`FAILED` é terminal:** depois de esgotar as tentativas, reenviar a mesma key devolve `FAILED`.
+  O provedor precisa reenviar com um novo id, depois de o operador investigar.
+
+**Concorrência e banco**
+- **Hot wallet:** operações da mesma wallet são serializadas pelo lock (corretas, mas sem
+  paralelismo dentro da wallet). Wallets diferentes rodam em paralelo.
+- **Retry único em `DuplicateRecordError`:** cobre a corrida normal (ex.: wallet inexistente). Sob
+  disputa extrema **sem** o lock (cenário de mutação), a segunda colisão vira erro, nunca saldo errado.
+- **Saldo ⇄ ledger não é conferido por trigger entre tabelas** (custo a cada operação). É garantido
+  pelo domínio, pela transação única e pela corrente `(wallet_id, wallet_version)`, e verificado
+  pela reconciliação.
+- **Superusuário pode desligar triggers.** Em produção: trigger + `REVOKE` para o usuário da
+  aplicação + auditoria.
+- **Inbox e outbox crescem para sempre:** não há rotina de limpeza. Em produção: apagar registros de
+  inbox mais antigos que a janela possível de redelivery (o SQS retém mensagens por no máximo 14 dias)
+  e eventos de outbox já publicados há mais de N dias (ou movê-los para um arquivo).
+
+**Mensageria**
+- **Ordem dos eventos publicados é best-effort:** se um evento falhar e o seguinte não, o seguinte
+  pode sair antes. O `walletVersion` permite ao consumidor ordenar.
+- **O publisher segura a transação durante a chamada ao SQS** (lote pequeno: 10).
+- **Retry infinito na outbox:** um evento "envenenado" seria tentado a cada 5 minutos para sempre.
+  Fica visível em `wagering_outbox_lag_seconds`.
+- **Os consumidores de `wager-events.fifo` não fazem parte deste serviço:** a deduplicação pelo
+  `eventId` é responsabilidade deles.
+- **Workers no mesmo processo da API** (simples). Em produção, poderiam ser processos separados; as
+  flags `ENABLE_*` já permitem.
+- **MiniStack é um projeto jovem:** validado para o que usamos, mas menos testado no mercado que o
+  LocalStack.
+
+**Operação**
+- **Autenticação não implementada** (ponto de extensão + desenho na §10).
+- **`/metrics` aberto**; em produção, numa porta ou rede interna. Sem tracing distribuído
+  (OpenTelemetry é opcional); o `correlationId` cumpre o papel básico.
+- **`/health/ready` confere a fila de entrada, não a de eventos:** se só a fila de eventos sumir, a
+  instância continua "pronta", e o problema aparece no outbox lag.
+- **SIGTERM no Windows:** não existe SIGTERM entre processos no Windows. O desligamento gracioso foi
+  testado chamando o `stop()` do consumidor; a queda brusca (kill -9) foi testada com processos reais.

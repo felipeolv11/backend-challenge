@@ -151,7 +151,48 @@ _(a definir)_
 _(a definir)_
 
 ## 7. Modelo de domínio e transições de estado
-_(a definir)_
+
+Todas as classes de domínio usam construtor privado + factories estáticas (`create`/`open`/`from`
+para criar com validação, `rehydrate` para reconstruir do banco sem revalidar).
+
+### 7.1 `Wallet` (aggregate root) e `WalletLedgerEntry`
+
+**A única forma de mudar o saldo é `debit()` / `credit()`, e ambos devolvem o lançamento do ledger.**
+Não existe caminho em que o saldo muda sem um lançamento, nem na abertura: `Wallet.open()` devolve
+`{ wallet, openingEntry }`, com o lançamento CREDIT da transação `OPENING` quando o saldo inicial
+é maior que zero.
+
+- **Alternativa descartada:** a `Wallet` devolver `void` e o caso de uso montar o lançamento. Daria
+  classes mais independentes, mas a consistência saldo ⇄ ledger dependeria de quem chama
+  lembrar de criar o lançamento.
+
+**Regras garantidas na `Wallet`:**
+- O valor da movimentação precisa ser > 0 e estar na moeda da wallet (`CurrencyMismatchError`).
+  Movimentar zero geraria um lançamento vazio e um `version++` sem mudança de saldo.
+- Débito maior que o saldo lança `InsufficientBalanceError`, e o estado não muda.
+- `version` começa em 1 na abertura e incrementa a cada `debit`/`credit` bem-sucedido. Como o
+  valor é sempre > 0, todo movimento aceito muda o saldo.
+- O lançamento é criado **antes** de alterar o estado. Se a criação falhar, a wallet fica intacta.
+
+**Erros como exceção:** saldo insuficiente lança `InsufficientBalanceError`. O caso de uso
+captura e escolhe o `failureCode`: aposta sem saldo e reversão que deixaria o saldo negativo
+recebem códigos diferentes (regra 9 da seção 7 do enunciado).
+- **Alternativa descartada:** devolver `{ ok, error }`. Misturaria dois estilos de erro (o `Money`
+  já lança exceção) e deixaria cada chamada mais verbosa.
+
+**`WalletLedgerEntry` é imutável de forma estrutural:** só campos `readonly`, nenhum método que
+altere estado, e `Object.freeze(this)` no construtor (o `readonly` só existe no TypeScript;
+o `freeze` vale em runtime). `create()` valida que o valor é > 0, que os saldos não são negativos,
+que as moedas batem e que `balanceBefore ± money === balanceAfter`. `rehydrate()` não valida:
+um dado inconsistente no banco deve ser **detectado pela reconciliação**, não quebrar a leitura.
+
+**Defesa em camadas contra saldo negativo:** (1) `Wallet.debit()` checa o saldo; (2)
+`WalletLedgerEntry.create()` recusa `balanceAfter` negativo; (3) `CHECK (balance >= 0)` no banco
+_(etapa do schema)_. Um teste de mutação (remover a checagem 1) confirmou que a camada 2 segura
+o saldo e que os testes detectam a regressão.
+
+**Ids vêm de fora:** o caso de uso gera os ids (UUID v7) e os passa ao domínio. Assim o domínio não
+depende do runtime e os testes usam ids previsíveis.
 
 ## 8. Taxonomia de `failureCode` e mapeamento de status HTTP
 _(a definir)_

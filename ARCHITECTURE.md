@@ -191,11 +191,89 @@ um dado inconsistente no banco deve ser **detectado pela reconciliação**, não
 _(etapa do schema)_. Um teste de mutação (remover a checagem 1) confirmou que a camada 2 segura
 o saldo e que os testes detectam a regressão.
 
+### 7.2 `WagerTransaction`: estados e transições
+
+```
+PENDING ──► PROCESSED | REJECTED | FAILED | PENDING_REFERENCE
+PENDING_REFERENCE ──► PROCESSED | REJECTED | FAILED
+PROCESSED, REJECTED, FAILED: terminais (nenhuma transição)
+```
+
+Qualquer outra transição lança `InvalidTransactionStateError`. Ele herda de `ProgrammingError`,
+**não** de `DomainError`: tentar mudar uma transação terminal é bug nosso (deve virar 500), não
+erro do provedor (4xx). O mesmo vale para `InvalidLedgerEntryError`.
+
+| Kind | Valor aceito | Referência | Efeito no saldo |
+|---|---|---|---|
+| `BET` | > 0 | não usa | DEBIT |
+| `WIN` | ≥ 0 | opcional; se vier, deve ser uma `BET` | CREDIT (0.00 não move saldo) |
+| `LOSS` | ≥ 0 | opcional; se vier, deve ser uma `BET` | nenhum |
+| `REFUND` | > 0, igual ao da referência | obrigatória; só `BET` | CREDIT |
+| `ROLLBACK` | > 0, igual ao da referência | obrigatória; `BET`, `WIN` ou `REFUND` | inverso da referência |
+| `OPENING` | > 0 | — (interno, não pode ser submetido) | CREDIT |
+
+**Erros de payload × rejeição de negócio:**
+- `InvalidWagerTransactionError`: o payload não faz sentido (REFUND sem referência, BET de 0.00,
+  kind `OPENING`). A transação **não é persistida**.
+- `WagerRuleViolationError(failureCode)`: o payload é válido, mas viola uma regra (referência de
+  outra rodada, valor diferente da referência...). A transação é **persistida como `REJECTED`**,
+  com o `failureCode`, e fica auditável.
+
+**`OPENING` é interno:** é criado por `WagerTransaction.opening()`, nunca por `create()`. Já nasce
+`PROCESSED` porque é aplicado na mesma transação SQL que cria a wallet. Os campos de provedor
+recebem valores fixos (`providerId = "internal"`, `externalTransactionId = "opening:{walletId}"`).
+
+### 7.3 Interpretações adotadas (o enunciado pede para documentar)
+
+1. **Uma reversão por referência, no total (regra 4).** O texto diz "não pode ser revertida duas
+   vezes pelo **mesmo tipo** de operação". Lido ao pé da letra, uma BET de 80 aceitaria um REFUND
+   (+80) **e** um ROLLBACK (+80): crédito duplicado, que é falha eliminatória. Por isso cada
+   transação pode ser revertida **uma única vez**, por REFUND ou por ROLLBACK. Encadear continua
+   permitido: `BET → REFUND → ROLLBACK do REFUND`. Garantia no banco: índice único parcial em
+   `reference_transaction_id` para reversões `PROCESSED` _(etapa do schema)_.
+2. **Referência opcional de WIN/LOSS é validada quando vier.** Mesmas regras de contexto (provider,
+   player, wallet, moeda e rodada) e deve apontar para uma `BET`. Se a BET ainda não chegou, o WIN
+   fica `PENDING_REFERENCE`: um prêmio nunca é pago antes da aposta existir. O valor do WIN pode ser
+   diferente do da BET (o prêmio não é a aposta).
+3. **Valores:** BET, REFUND e ROLLBACK exigem > 0. WIN e LOSS aceitam 0.00 (WIN 0.00 é comum para
+   fechar uma rodada sem prêmio). WIN 0.00 e LOSS ficam `PROCESSED` sem lançamento e sem
+   `version++`. Consequência: o ROLLBACK de um WIN de 0.00 não é possível (ROLLBACK exige > 0 e
+   valor igual ao da referência), o que faz sentido porque não há nada a desfazer.
+4. **Referência `REJECTED`/`FAILED`:** não há o que reverter, então `REFERENCE_NOT_PROCESSED`.
+   **Referência ainda `PENDING`/`PENDING_REFERENCE`:** a transação aguarda (`PENDING_REFERENCE`),
+   como se a referência não tivesse chegado.
+5. **Uma transação não pode referenciar a si mesma:** payload inválido.
+
 **Ids vêm de fora:** o caso de uso gera os ids (UUID v7) e os passa ao domínio. Assim o domínio não
 depende do runtime e os testes usam ids previsíveis.
 
 ## 8. Taxonomia de `failureCode` e mapeamento de status HTTP
-_(a definir)_
+
+### 8.1 `failureCode`
+
+Códigos estáveis e legíveis por máquina (`src/domain/failure-code.ts`). São **contrato público**:
+nunca são renomeados, só adicionados.
+
+- **Formato:** lista simples em MAIÚSCULAS. Alternativa descartada: códigos hierárquicos
+  (`BALANCE.INSUFFICIENT_FUNDS`), porque o prefixo não muda a decisão do provedor.
+
+| Código | Status | Quando | O que o provedor deve fazer |
+|---|---|---|---|
+| `INSUFFICIENT_FUNDS` | REJECTED | BET maior que o saldo | Não reenviar; informar o jogador |
+| `REVERSAL_WOULD_OVERDRAW` | REJECTED | REFUND/ROLLBACK deixaria o saldo negativo (ex.: rollback de um WIN já apostado) | Não reenviar; tratar manualmente (caso operacional, diferente de aposta sem saldo) |
+| `CURRENCY_MISMATCH` | REJECTED | Moeda diferente da moeda da wallet | Corrigir o payload |
+| `WALLET_NOT_FOUND` | REJECTED | Wallet inexistente | Corrigir o payload |
+| `PLAYER_WALLET_MISMATCH` | REJECTED | Wallet de outro player | Corrigir o payload |
+| `REFERENCE_NOT_FOUND` | REJECTED | Referência não chegou dentro do limite de tentativas | Enviar a referência e depois uma nova reversão, com novo id |
+| `REFERENCE_MISMATCH` | REJECTED | Referência de outro provider/player/wallet/moeda/rodada | Corrigir o payload |
+| `INVALID_REFERENCE_KIND` | REJECTED | Tipo de referência não permitido | Corrigir o payload |
+| `REFERENCE_NOT_PROCESSED` | REJECTED | Referência terminou REJECTED/FAILED | Não reenviar; não há o que reverter |
+| `REFERENCE_ALREADY_REVERSED` | REJECTED | Referência já revertida | Não reenviar |
+| `AMOUNT_MISMATCH` | REJECTED | Valor da reversão ≠ valor da referência | Corrigir o valor |
+| `PROCESSING_ERROR` | FAILED | Erro inesperado que persistiu após os retries | Contatar o operador; a transação fica auditável |
+
+### 8.2 Status HTTP
+_(a definir na etapa da API)_
 
 ## 9. Observabilidade
 _(a definir)_

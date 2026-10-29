@@ -137,10 +137,49 @@ temporariamente indisponível"). A indisponibilidade é sinalizada pelo `GET /he
   para a DLQ. Tudo funcionou.
 
 ### 4.2 Consumidor, inbox, retry e DLQ
-_(a definir)_
+
+**Inbox (`InboxMessage`):** registro único por `(consumerName, messageId)`, gravado **na mesma
+transação SQL** da alteração financeira. Se a mesma mensagem chegar de novo (at-least-once,
+crash entre o commit e o ack), o registro já existe e o efeito não se repete.
+
+**Mesmo `messageId` com conteúdo diferente** (hash do payload diferente) é tratado como **erro
+permanente e vai para a DLQ**. Indica bug do produtor; mandar para a DLQ não aplica nada por engano
+e não descarta nada em silêncio.
+- **Alternativa descartada:** ignorar como duplicata. Uma operação legítima com conteúdo novo
+  seria descartada sem ninguém saber.
+
+_(Consumidor, retry e DLQ: a definir na etapa do SQS.)_
 
 ### 4.3 Transactional Outbox
-_(a definir)_
+
+O evento é gravado na tabela de outbox **na mesma transação SQL** do saldo, ledger e inbox. Um
+worker separado publica os pendentes. O `id` da mensagem de outbox **é o `eventId`**: qualquer
+republicação usa o mesmo id, e o consumidor deduplica por ele.
+
+**Política de retry da publicação: infinita, com backoff exponencial e teto.** A espera é de 1s,
+2s, 4s, 8s... até 5 minutos e, a partir daí, uma tentativa a cada 5 minutos, para sempre.
+- **Por quê:** o enunciado proíbe perder eventos confirmados, e nunca desistir garante isso. O teto
+  evita esperas enormes quando o SQS volta. Eventos presos aparecem nas métricas (outbox lag e
+  tentativas).
+- **Alternativa descartada:** limite de tentativas e evento "dead". Um SQS fora do ar por algumas
+  horas estacionaria eventos válidos, que dependeriam de reprocessamento manual.
+- **Sem jitter:** cálculo determinístico, fácil de testar. Publishers concorrentes não disputam o
+  mesmo evento porque travam as linhas que pegam _(etapa do worker)_.
+
+**Eventos (`IntegrationEvent<T>`):** classe abstrata com o envelope do enunciado e uma subclasse
+por evento. `eventType` e `version` ficam **no tipo**. `data` só tem tipos JSON (`MoneyProps` como
+string, datas ISO-8601, `null` em vez de `undefined` para o formato ser estável) e é congelado.
+
+| Evento | `aggregateId` | Quando |
+|---|---|---|
+| `WagerTransactionProcessed` | id da transação | Qualquer transação aplicada, inclusive LOSS. Leva o saldo logo após a aplicação |
+| `WagerTransactionRejected` | id da transação | Rejeição por regra de negócio, com `failureCode` |
+| `WagerTransactionPendingReference` | id da transação | Referência ausente |
+| `WalletBalanceChanged` | id da wallet | **Somente** quando há lançamento no ledger. Leva saldo antes/depois e `walletVersion` |
+
+Cada factory `from()` confere o estado da origem (ex.: `WagerTransactionProcessed` exige transação
+`PROCESSED`; `WalletBalanceChanged` exige que o lançamento corresponda ao saldo atual da wallet).
+Criar evento a partir de estado errado é bug (`InvalidEventSourceError`).
 
 ---
 

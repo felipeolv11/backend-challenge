@@ -44,3 +44,9 @@ export class InvalidLedgerEntryError extends ProgrammingError {}
 
 /** Tentativa de transicionar uma transação que já está num estado terminal (ou transição inválida). */
 export class InvalidTransactionStateError extends ProgrammingError {}
+
+/** Inbox já processada ou outbox já publicada recebendo outra transição. */
+export class InvalidMessageStateError extends ProgrammingError {}
+
+/** Evento criado a partir de um objeto no estado errado (ex.: Processed de uma transação REJECTED). */
+export class InvalidEventSourceError extends ProgrammingError {}

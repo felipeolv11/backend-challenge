@@ -227,6 +227,64 @@ describe('erros transitórios: retry com backoff e limite de tentativas', () => 
   }, 15_000);
 });
 
+describe('ordem dentro da wallet e paralelismo entre wallets', () => {
+  test('se a 1ª mensagem de uma wallet falha, a 2ª da MESMA wallet espera (não passa na frente)', async () => {
+    const wallet = await openWallet(services, '100.00');
+    // Ordem certa: aposta de 30 (passa, saldo 70) e depois de 80 (sem saldo).
+    // Se a de 80 passasse na frente: a de 80 passaria (saldo 20) e a de 30 seria recusada.
+    const first = { messageId: `order-${Date.now()}-1`, data: { ...command(wallet, { amount: '30.00' }) } };
+    const second = { messageId: `order-${Date.now()}-2`, data: { ...command(wallet, { amount: '80.00' }) } };
+    await sendWagerMessage(sqs, queues.wagerQueueUrl, first);
+    await sendWagerMessage(sqs, queues.wagerQueueUrl, second);
+
+    // A primeira chamada ao banco falha (transitório): a 1ª mensagem volta à fila com backoff de 1s.
+    const real = new MikroOrmTransactionRunner(orm);
+    let calls = 0;
+    const failOnce: TransactionRunner = {
+      run: (work) => (++calls === 1 ? Promise.reject(new TransientInfrastructureError('database down')) : real.run(work)),
+    };
+    const actions: ConsumerAction[] = [];
+    const c = consumer({ process: new ProcessWagerTransaction(failOnce), actions });
+
+    await c.pollOnce();
+    expect(actions).toEqual(['retry-scheduled', 'released']); // a 2ª foi devolvida, não processada
+    expect(await countRows(orm, `SELECT 1 FROM wager_transactions WHERE wallet_id = ? AND kind = 'BET'`, [wallet.id])).toBe(0);
+
+    await sleep(1_500);
+    await consumeAll(c);
+
+    const statusOf = async (externalId: string) =>
+      (await orm.em.fork().execute(`SELECT status FROM wager_transactions WHERE external_transaction_id = ?`, [externalId]))[0]!.status;
+    expect(await statusOf(first.data.externalTransactionId)).toBe('PROCESSED');
+    expect(await statusOf(second.data.externalTransactionId)).toBe('REJECTED');
+    expect(await storedBalance(orm, wallet.id)).toBe('70.00');
+    await expectWalletMatchesLedger(orm, wallet.id);
+  }, 15_000);
+
+  test('mensagens de wallets diferentes no mesmo lote são tratadas em paralelo', async () => {
+    const wallets = await Promise.all(Array.from({ length: 5 }, () => openWallet(services, '100.00')));
+    for (const [i, wallet] of wallets.entries()) {
+      await sendWagerMessage(sqs, queues.wagerQueueUrl, { messageId: `parallel-${Date.now()}-${i}`, data: { ...command(wallet, { amount: '10.00' }) } });
+    }
+
+    // Cada processamento leva 300ms. Em sequência, 5 wallets levariam 1,5s; em paralelo, ~300ms.
+    const real = new MikroOrmTransactionRunner(orm);
+    const slowRunner: TransactionRunner = { run: async (work) => (await sleep(300), real.run(work)) };
+    const actions: ConsumerAction[] = [];
+    const c = consumer({ process: new ProcessWagerTransaction(slowRunner), actions });
+
+    const started = performance.now();
+    let received = 0;
+    while (received < 5) received += await c.pollOnce();
+    const elapsedMs = performance.now() - started;
+
+    expect(actions.filter((a) => a === 'acked')).toHaveLength(5);
+    console.log(`  5 wallets no mesmo lote tratadas em ${elapsedMs.toFixed(0)} ms`);
+    expect(elapsedMs).toBeLessThan(1_200);
+    for (const wallet of wallets) expect(await storedBalance(orm, wallet.id)).toBe('90.00');
+  }, 15_000);
+});
+
 describe('SIGTERM: parada graciosa', () => {
   test('termina a mensagem em andamento, devolve as outras à fila, e outra instância as processa', async () => {
     const wallet = await openWallet(services, '100.00');

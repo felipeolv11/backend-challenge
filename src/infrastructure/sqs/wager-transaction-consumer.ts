@@ -81,7 +81,7 @@ export class WagerTransactionConsumer {
     }
   }
 
-  /** Uma rodada: recebe até 10 mensagens e trata uma de cada vez. Devolve quantas recebeu. */
+  /** Uma rodada: recebe até 10 mensagens e as trata (wallets diferentes em paralelo). Devolve quantas recebeu. */
   async pollOnce(): Promise<number> {
     this.longPoll = new AbortController();
     let messages: Message[];
@@ -101,22 +101,47 @@ export class WagerTransactionConsumer {
       throw error;
     }
 
-    // Sequencial de propósito: numa fila FIFO, mensagens do mesmo grupo (mesma wallet) precisam
-    // ser tratadas em ordem. Paralelismo vem de várias instâncias e de grupos diferentes.
+    // DECISÃO: mensagens de grupos (wallets) DIFERENTES do mesmo lote são tratadas em paralelo;
+    //          as do MESMO grupo, uma de cada vez e em ordem.
+    // POR QUÊ: o teste de carga mostrou cerca de 32 mensagens/s por instância tratando tudo em
+    //          sequência, mesmo quando o lote trazia wallets diferentes, que não disputam nada
+    //          entre si. A ordem que importa (dentro da wallet) continua garantida.
+    // ALTERNATIVA: tudo em paralelo — não usei porque duas mensagens da mesma wallet poderiam ser
+    //              aplicadas fora de ordem (ex.: a aposta de 80 passar na frente da de 30).
+    const groups = new Map<string, Message[]>();
+    for (const message of messages) {
+      const group = message.Attributes?.MessageGroupId ?? message.MessageId ?? 'unknown';
+      groups.set(group, [...(groups.get(group) ?? []), message]);
+    }
+    await Promise.all([...groups.values()].map((groupMessages) => this.handleGroup(groupMessages)));
+    return messages.length;
+  }
+
+  /** Trata as mensagens de UM grupo (uma wallet) em ordem. */
+  private async handleGroup(messages: Message[]): Promise<void> {
     for (let i = 0; i < messages.length; i++) {
       if (this.stopRequested) {
         await this.release(messages.slice(i));
-        break;
+        return;
       }
+
+      let action: ConsumerAction | undefined;
       try {
-        await this.handle(messages[i]!);
+        action = await this.handle(messages[i]!);
       } catch (error) {
         // Ex.: o ack (DeleteMessage) falhou. Não mexemos na mensagem: ela volta sozinha depois do
-        // visibility timeout e a inbox garante o replay. Segue para a próxima.
+        // visibility timeout e a inbox garante o replay.
         this.logger.error({ event: 'sqs_ack_failed', sqsMessageId: messages[i]!.MessageId, reason: errorMessage(error) });
       }
+
+      // A mensagem não foi concluída (vai voltar para a fila): as seguintes da MESMA wallet não podem
+      // passar na frente dela. Elas voltam para a fila agora; o FIFO só as entrega de novo depois
+      // que a que falhou for concluída.
+      if (action !== 'acked' && action !== 'dead-lettered') {
+        await this.release(messages.slice(i + 1));
+        return;
+      }
     }
-    return messages.length;
   }
 
   async handle(message: Message): Promise<ConsumerAction> {

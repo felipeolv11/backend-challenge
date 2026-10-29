@@ -37,14 +37,17 @@ async function publishAll(publisher: PublishOutbox) {
   while ((await publisher.publishBatch()).claimed > 0) {}
 }
 
-/** Envolve um publisher contando quantas vezes cada evento foi publicado. */
+/** Envolve um publisher contando quantas vezes cada evento foi publicado com sucesso. */
 function countingPublisher(inner: EventPublisher, delayMs = 0) {
   const counts = new Map<string, number>();
   const publisher: EventPublisher = {
-    async publish(message: OutboxMessage) {
+    async publishAll(messages: OutboxMessage[]) {
       if (delayMs) await sleep(delayMs);
-      await inner.publish(message);
-      counts.set(message.id, (counts.get(message.id) ?? 0) + 1);
+      const outcomes = await inner.publishAll(messages);
+      for (const outcome of outcomes) {
+        if (outcome.error === undefined) counts.set(outcome.messageId, (counts.get(outcome.messageId) ?? 0) + 1);
+      }
+      return outcomes;
     },
   };
   return { publisher, counts };
@@ -127,7 +130,7 @@ describe('falhas e recuperação (seção 11)', () => {
     await expect(
       runner.run(async (repositories) => {
         const [first] = await repositories.outbox.claimDue(new Date(), 1);
-        await sqsPublisher.publish(first!);
+        await sqsPublisher.publishAll([first!]);
         published.push(first!.id);
         throw new Error('process killed after publish');
       }),
@@ -137,9 +140,10 @@ describe('falhas e recuperação (seção 11)', () => {
     const republished: string[] = [];
     await publishAll(
       new PublishOutbox(runner, {
-        async publish(message) {
-          await sqsPublisher.publish(message);
-          republished.push(message.id);
+        async publishAll(messages) {
+          const outcomes = await sqsPublisher.publishAll(messages);
+          republished.push(...messages.map((message) => message.id));
+          return outcomes;
         },
       }),
     );
@@ -156,9 +160,7 @@ describe('falhas e recuperação (seção 11)', () => {
     await generateEvents(1);
     const before = Date.now();
     const result = await new PublishOutbox(runner, {
-      publish: async () => {
-        throw new Error('SQS unavailable');
-      },
+      publishAll: async (messages) => messages.map((message) => ({ messageId: message.id, error: new Error('SQS unavailable') })),
     }).publishBatch();
 
     expect(result).toEqual({ claimed: 4, published: 0, failed: 4 });
@@ -177,5 +179,29 @@ describe('falhas e recuperação (seção 11)', () => {
     await publishAll(new PublishOutbox(runner, new SqsEventPublisher(sqs, queues.eventsQueueUrl)));
     expect(await pending()).toBe(0);
     await drainQueue(sqs, queues.eventsQueueUrl);
+  });
+
+  test('falha PARCIAL no lote: só as que falharam são reagendadas; as outras ficam publicadas', async () => {
+    await generateEvents(1);
+    const sqsPublisher = new SqsEventPublisher(sqs, queues.eventsQueueUrl);
+    let failedId: string | undefined;
+
+    // O SQS aceita o lote mas recusa UMA das mensagens (o SendMessageBatch pode fazer isso).
+    const result = await new PublishOutbox(runner, {
+      async publishAll(messages) {
+        failedId = messages[1]!.id;
+        const ok = await sqsPublisher.publishAll(messages.filter((message) => message.id !== failedId));
+        return [...ok, { messageId: failedId, error: new Error('InternalError: throttled') }];
+      },
+    }).publishBatch();
+
+    expect(result).toEqual({ claimed: 4, published: 3, failed: 1 });
+    const stillPending = await orm.em.fork().execute(`SELECT id, attempts FROM outbox_messages WHERE published_at IS NULL`);
+    expect(stillPending).toEqual([{ id: failedId, attempts: 1 }]);
+
+    await sleep(1_100);
+    await publishAll(new PublishOutbox(runner, sqsPublisher));
+    expect(await pending()).toBe(0);
+    expect(await drainQueue(sqs, queues.eventsQueueUrl)).toHaveLength(4);
   });
 });

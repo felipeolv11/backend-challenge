@@ -202,6 +202,11 @@ export class MikroOrmOutboxRepository implements OutboxRepository {
     return records.map(toOutboxMessage);
   }
 
+  async markPublished(ids: string[], at: Date): Promise<void> {
+    if (ids.length === 0) return;
+    await this.em.nativeUpdate(OutboxMessageRecord, { id: { $in: ids } }, { publishedAt: at, nextAttemptAt: null });
+  }
+
   async update(message: OutboxMessage): Promise<void> {
     await this.em.nativeUpdate(
       OutboxMessageRecord,

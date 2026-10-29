@@ -314,6 +314,7 @@ describe('atomicidade: transação, ledger, saldo, outbox e inbox são gravados 
               },
               claimDue: (now, limit) => repositories.outbox.claimDue(now, limit),
               update: (message) => repositories.outbox.update(message),
+              markPublished: (ids, at) => repositories.outbox.markPublished(ids, at),
             },
           }),
         ),

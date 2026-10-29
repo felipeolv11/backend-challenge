@@ -67,11 +67,23 @@ export interface OutboxRepository {
   claimDue(now: Date, limit: number): Promise<OutboxMessage[]>;
   /** Grava publishedAt, attempts e nextAttemptAt. */
   update(message: OutboxMessage): Promise<void>;
+  /** Marca várias mensagens como publicadas num UPDATE só. */
+  markPublished(ids: string[], at: Date): Promise<void>;
 }
 
-/** Porta de publicação dos eventos (implementada com SQS). */
+/** Resultado da publicação de uma mensagem dentro de um lote: sem `error` = publicada. */
+export interface PublishOutcome {
+  messageId: string;
+  error?: unknown;
+}
+
+/**
+ * Porta de publicação dos eventos (implementada com SQS).
+ * Publica um lote NA ORDEM recebida e diz, mensagem por mensagem, o que foi publicado: uma falha
+ * parcial não pode fazer o lote inteiro ser repetido nem marcar como publicado o que não foi.
+ */
 export interface EventPublisher {
-  publish(message: OutboxMessage): Promise<void>;
+  publishAll(messages: OutboxMessage[]): Promise<PublishOutcome[]>;
 }
 
 /** Repositórios que trabalham DENTRO da mesma transação SQL. */

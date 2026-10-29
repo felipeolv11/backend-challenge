@@ -86,7 +86,7 @@ export function loadConsumerConfig(): ConsumerConfig {
 
 export function loadOutboxPublisherConfig(): OutboxPublisherConfig {
   return {
-    batchSize: integer('OUTBOX_BATCH_SIZE', 10),
+    batchSize: integer('OUTBOX_BATCH_SIZE', 100),
     pollIntervalMs: integer('OUTBOX_POLL_INTERVAL_MS', 500),
   };
 }

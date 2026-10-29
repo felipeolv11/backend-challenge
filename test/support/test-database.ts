@@ -10,8 +10,8 @@ import baseConfig from '../../src/infrastructure/database/mikro-orm.config';
 //              Windows com Bun.
 export const TEST_DATABASE_NAME = 'wagering_test';
 
-export function testDatabaseUrl(): string {
-  return databaseUrl(TEST_DATABASE_NAME);
+export function testDatabaseUrl(databaseName = TEST_DATABASE_NAME): string {
+  return databaseUrl(databaseName);
 }
 
 function databaseUrl(databaseName: string): string {
@@ -20,13 +20,13 @@ function databaseUrl(databaseName: string): string {
   return url.toString();
 }
 
-async function ensureTestDatabaseExists(): Promise<void> {
+async function ensureDatabaseExists(databaseName: string): Promise<void> {
   // Conecta no banco administrativo "postgres" só para criar o banco de teste, se faltar.
   const admin = await MikroORM.init({ ...baseConfig, clientUrl: databaseUrl('postgres') });
   try {
-    const existing = await admin.em.execute('SELECT 1 FROM pg_database WHERE datname = ?', [TEST_DATABASE_NAME]);
+    const existing = await admin.em.execute('SELECT 1 FROM pg_database WHERE datname = ?', [databaseName]);
     if (existing.length === 0) {
-      await admin.em.execute(`CREATE DATABASE ${TEST_DATABASE_NAME}`);
+      await admin.em.execute(`CREATE DATABASE ${databaseName}`);
     }
   } finally {
     await admin.close(true);
@@ -38,9 +38,9 @@ async function ensureTestDatabaseExists(): Promise<void> {
  * DROP SCHEMA ... CASCADE apaga tudo, inclusive o ledger (os triggers de imutabilidade valem
  * para UPDATE/DELETE/TRUNCATE de linhas, não para remover a tabela inteira).
  */
-export async function createTestOrm(): Promise<MikroORM> {
-  await ensureTestDatabaseExists();
-  const orm = await MikroORM.init({ ...baseConfig, clientUrl: databaseUrl(TEST_DATABASE_NAME) });
+export async function createTestOrm(databaseName = TEST_DATABASE_NAME): Promise<MikroORM> {
+  await ensureDatabaseExists(databaseName);
+  const orm = await MikroORM.init({ ...baseConfig, clientUrl: databaseUrl(databaseName) });
   await orm.em.execute('DROP SCHEMA public CASCADE');
   await orm.em.execute('CREATE SCHEMA public');
   await orm.migrator.up();

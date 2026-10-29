@@ -16,7 +16,8 @@
     "test:integration": "bun test test/integration",
     "sqs:setup": "bun run src/infrastructure/sqs/setup-queues.ts",
     "stack:up": "docker compose --profile app up -d --build --scale app=3",
-    "stack:down": "docker compose --profile app down"
+    "stack:down": "docker compose --profile app down",
+    "test:load": "bun run test/load/load-test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-sqs": "3.1159.0",

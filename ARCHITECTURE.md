@@ -86,6 +86,7 @@ de uma transação.
 | `Migration20261029120000_initial_schema` | Tabelas, constraints, índices e triggers de imutabilidade |
 | `Migration20261029180000_ledger_wallet_version` | `wallet_version` no ledger + `UNIQUE (wallet_id, wallet_version)`, com backfill (ver §5.1) |
 | `Migration20261029200000_pending_reference_retry` | Controle de novas tentativas de `PENDING_REFERENCE` (ver §4.5) |
+| `Migration20261029220000_outbox_claim_index` | Índice parcial `(occurred_at, id)` para pegar o lote da outbox sem ler a tabela inteira (achado do teste de carga: 13,5 ms → 0,085 ms) |
 
 - **Por quê:** as garantias de unicidade, imutabilidade e não-negatividade precisam estar
   **no schema** (seção 5, item 9). Isso exige CHECK constraints e triggers, que o gerador
@@ -243,8 +244,10 @@ de uma execução só no Docker Compose):
 - **ack somente após o commit:** `DeleteMessage` só é chamado depois que `execute()` retorna, e
   fica **fora** do `try` do processamento. Se o ack falhar, a mensagem volta sozinha (visibility
   timeout) e a inbox devolve o replay, sem efeito duplicado.
-- Mensagens de um lote são tratadas **em sequência** (ordem dentro do grupo FIFO). O paralelismo
-  vem de várias instâncias e grupos diferentes.
+- Mensagens de **wallets diferentes** (grupos FIFO diferentes) do mesmo lote são tratadas **em
+  paralelo**; as da **mesma wallet**, uma de cada vez e em ordem. Se uma mensagem de uma wallet não é
+  concluída (vai voltar à fila), as seguintes **da mesma wallet** são devolvidas também e não passam na
+  frente dela. O teste de carga mostrou 2,1x de vazão com o paralelismo por wallet (ver `LOAD-TEST.md`).
 
 | Tipo de erro | Exemplos | Ação |
 |---|---|---|
@@ -301,8 +304,10 @@ Cada factory `from()` confere o estado da origem (ex.: `WagerTransactionProcesse
 Criar evento a partir de estado errado é bug (`InvalidEventSourceError`).
 
 **Publisher** (`src/application/publish-outbox.ts` + `SqsEventPublisher`):
-- Pega um lote com `SELECT ... FOR UPDATE SKIP LOCKED`, publica, marca `published_at` e faz
-  commit, numa transação. **Vários publishers concorrentes** dividem o trabalho: um pula as linhas
+- Pega um lote de **100** com `SELECT ... FOR UPDATE SKIP LOCKED` (usando o índice parcial da
+  migration 4), publica em lotes de **10 por chamada** (`SendMessageBatch`, um lote depois do outro para
+  manter a ordem por wallet), marca `published_at` e faz commit, numa transação. Falha parcial no lote é
+  tratada mensagem a mensagem: só as recusadas são reagendadas. **Vários publishers concorrentes** dividem o trabalho: um pula as linhas
   travadas pelo outro. Testado: dois publishers simultâneos, cada evento publicado **exatamente uma vez**.
 - Publica em `wager-events.fifo` com `MessageGroupId = walletId` (ordem por wallet) e
   `MessageDeduplicationId = eventId`.
@@ -312,7 +317,7 @@ Criar evento a partir de estado errado é bug (`InvalidEventSourceError`).
   consumidor deve deduplicar pelo `eventId` (garantia).
 - **Alternativa descartada:** reserva por coluna `locked_until` (lease), que adicionaria mais
   estados sem ganho aqui.
-- **Trade-off:** a transação fica aberta durante a chamada ao SQS (o lote é pequeno: 10). E a
+- **Trade-off:** a transação fica aberta durante as chamadas ao SQS (lote de 100, em 10 chamadas). E a
   ordem entre eventos da mesma wallet é **best-effort**: se um evento falhar e o seguinte não, o
   seguinte pode sair antes. Por isso o `WalletBalanceChanged` leva `walletVersion`, e o
   consumidor pode ordenar por ela.
@@ -710,6 +715,9 @@ As instâncias novas concluem as ~300 restantes, e no fim: cada mensagem virou *
 transação e um registro de inbox, os saldos batem com o ledger, os REFUNDs pendentes atravessaram a
 queda e foram processados, e **todo evento confirmado no banco chegou à fila de eventos**.
 
+**Teste de carga:** `bun run test:load`, com metodologia, resultados, gargalos encontrados e corrigidos e
+limitações em [`LOAD-TEST.md`](LOAD-TEST.md).
+
 **Docker Compose com várias instâncias:** `bun run stack:up` sobe infraestrutura + migrations +
 3 instâncias da aplicação (portas 3000 a 3002), usando o `Dockerfile` (imagem do Bun, sem build).
 
@@ -742,7 +750,7 @@ Limitações assumidas conscientemente, com o que eu faria a seguir.
 **Mensageria**
 - **Ordem dos eventos publicados é best-effort:** se um evento falhar e o seguinte não, o seguinte
   pode sair antes. O `walletVersion` permite ao consumidor ordenar.
-- **O publisher segura a transação durante a chamada ao SQS** (lote pequeno: 10).
+- **O publisher segura a transação durante as chamadas ao SQS** (lote de 100, em 10 chamadas).
 - **Retry infinito na outbox:** um evento "envenenado" seria tentado a cada 5 minutos para sempre.
   Fica visível em `wagering_outbox_lag_seconds`.
 - **Os consumidores de `wager-events.fifo` não fazem parte deste serviço:** a deduplicação pelo

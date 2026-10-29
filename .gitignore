@@ -33,3 +33,5 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # Finder (MacOS) folder config
 .DS_Store
 
+# saída da última execução do teste de carga (os resultados registrados ficam em load-test-results/N-*.md)
+load-test-results/last-run.*

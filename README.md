@@ -6,6 +6,7 @@ mesmo tempo por várias instâncias.
 
 - Enunciado: [`CHALLENGE.md`](CHALLENGE.md)
 - Decisões técnicas, trade-offs e limitações: [`ARCHITECTURE.md`](ARCHITECTURE.md)
+- Teste de carga (metodologia, resultados e análise): [`LOAD-TEST.md`](LOAD-TEST.md)
 
 ## Destaques
 
@@ -20,6 +21,8 @@ mesmo tempo por várias instâncias.
 - **Provado com processos reais:** 3 instâncias em paralelo e queda com `kill -9` no meio da carga,
   terminando com saldo = ledger em todas as wallets. Mais de 270 testes contra PostgreSQL e SQS reais
   (sem mocks).
+- **Teste de carga:** ~1.270 req/s com p99 de ~100 ms e 0% de erro; os gargalos encontrados foram
+  corrigidos e medidos antes e depois ([`LOAD-TEST.md`](LOAD-TEST.md)).
 
 ## Pré-requisitos
 
@@ -123,6 +126,7 @@ bun run infra:up                # os testes de integração usam PostgreSQL e SQ
 bun test                        # tudo (inclui 3 processos reais e queda com kill -9)
 bun run test:unit               # só unitários (não precisa de Docker)
 bun run test:integration        # só integração
+bun run test:load               # teste de carga (~6 min), ver LOAD-TEST.md
 ```
 
 Os testes de integração usam o PostgreSQL do Docker Compose num banco separado (`wagering_test`),
@@ -141,3 +145,4 @@ desenvolvimento não é tocado. O mapa "cenário da seção 13 → teste" está 
 | `bun run stack:up` / `stack:down` | Sistema inteiro no Docker com 3 instâncias |
 | `bun run typecheck` | Checagem de tipos (TypeScript estrito) |
 | `bun test` / `test:unit` / `test:integration` | Testes |
+| `bun run test:load` | Teste de carga (3 instâncias, 3 cenários) |

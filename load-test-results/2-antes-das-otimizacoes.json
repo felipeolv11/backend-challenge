@@ -1,0 +1,121 @@
+{
+  "environment": {
+    "date": "2026-10-29T18:39:03.081Z",
+    "os": "win32 10.0.26300",
+    "cpu": "Intel(R) Core(TM) i5-14600KF (20 threads)",
+    "memoryGb": 32,
+    "bun": "1.4.4",
+    "postgres": "18.4",
+    "setup": "3 instâncias (processos) + PostgreSQL e MiniStack em containers Docker na mesma máquina; 50 usuários virtuais; consumidor da fila de eventos ligado",
+    "events": "64978 eventos gravados na outbox; 64978 eventIds distintos recebidos na fila de eventos (64978 mensagens, incluindo repetições)"
+  },
+  "config": {
+    "instances": 3,
+    "virtualUsers": 50,
+    "distributed": {
+      "wallets": 500,
+      "durationSeconds": 20
+    },
+    "hotWallet": {
+      "durationSeconds": 15
+    },
+    "queue": {
+      "wallets": 200,
+      "messages": 3000
+    },
+    "warmupSeconds": 3
+  },
+  "reports": [
+    {
+      "name": "Distribuído (HTTP, 500 wallets)",
+      "durationSeconds": 20,
+      "requests": 22845,
+      "throughputPerSecond": 1139,
+      "latencyMs": {
+        "p50": 35.5,
+        "p95": 89.5,
+        "p99": 106.7,
+        "max": 160.8
+      },
+      "statusCounts": {
+        "200": 22845
+      },
+      "errorRate": 0,
+      "businessRejections": 0,
+      "lockConflicts": {
+        "lock_timeout": 0,
+        "deadlock": 0,
+        "version_conflict": 0,
+        "duplicate_key": 0
+      },
+      "maxOutboxLagSeconds": 20.45,
+      "maxOutboxPending": 46348,
+      "outboxDrainSeconds": 251.6,
+      "consistent": true,
+      "notes": [
+        "Apostas de 1.00 em wallets aleatórias: pouca disputa pelo mesmo lock."
+      ]
+    },
+    {
+      "name": "Hot wallet (HTTP, 1 wallet)",
+      "durationSeconds": 15.2,
+      "requests": 3078,
+      "throughputPerSecond": 202,
+      "latencyMs": {
+        "p50": 240.4,
+        "p95": 318.2,
+        "p99": 338.4,
+        "max": 370
+      },
+      "statusCounts": {
+        "200": 3078
+      },
+      "errorRate": 0,
+      "businessRejections": 0,
+      "lockConflicts": {
+        "lock_timeout": 0,
+        "deadlock": 0,
+        "version_conflict": 0,
+        "duplicate_key": 0
+      },
+      "maxOutboxLagSeconds": 11.91,
+      "maxOutboxPending": 4818,
+      "outboxDrainSeconds": 48.7,
+      "consistent": true,
+      "notes": [
+        "Todas as requisições na MESMA wallet: o lock pessimista as coloca em fila (custo esperado da escolha)."
+      ]
+    },
+    {
+      "name": "Fila SQS (3 consumidores)",
+      "durationSeconds": 30.1,
+      "requests": 3000,
+      "throughputPerSecond": 100,
+      "latencyMs": {
+        "p50": 15621,
+        "p95": 27552,
+        "p99": 28588,
+        "max": 28904
+      },
+      "statusCounts": {
+        "PROCESSED": 3000
+      },
+      "errorRate": 0,
+      "businessRejections": 0,
+      "lockConflicts": {
+        "lock_timeout": 0,
+        "deadlock": 0,
+        "version_conflict": 0,
+        "duplicate_key": 0
+      },
+      "maxOutboxLagSeconds": 14.71,
+      "maxOutboxPending": 3130,
+      "outboxDrainSeconds": 22.4,
+      "consistent": true,
+      "notes": [
+        "Latência = do envio ao SQS até a transação gravada no banco (inclui o tempo na fila).",
+        "Taxa de erro = mensagens que foram para a DLQ."
+      ]
+    }
+  ]
+}

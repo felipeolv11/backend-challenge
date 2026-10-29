@@ -42,7 +42,7 @@ export class PeriodicWorker {
         hasMoreWork = await this.task();
       } catch (error) {
         // Banco fora do ar, por exemplo: registra e tenta na próxima rodada (o worker não morre).
-        this.logger.warn(`${this.name} failed: ${error instanceof Error ? error.message : String(error)}`);
+        this.logger.warn({ event: 'worker_round_failed', worker: this.name, reason: error instanceof Error ? error.message : String(error) });
       }
       if (hasMoreWork) continue;
       await new Promise<void>((resolve) => {

@@ -1,5 +1,5 @@
 import { type MikroORM, UniqueConstraintViolationException } from '@mikro-orm/postgresql';
-import { DuplicateRecordError, TransientInfrastructureError } from '../../application/errors';
+import { ConcurrencyConflictError, DuplicateRecordError, TransientInfrastructureError } from '../../application/errors';
 import type { TransactionalRepositories, TransactionRunner } from '../../application/ports';
 import { createRepositories } from './repositories';
 
@@ -20,8 +20,14 @@ const TRANSIENT_SQLSTATES = new Set([
 ]);
 const TRANSIENT_NETWORK_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'ENOTFOUND']);
 
+/** Tipos de conflito de concorrência, para a métrica wagering_lock_conflicts_total. */
+export type ConflictType = 'lock_timeout' | 'deadlock' | 'version_conflict' | 'duplicate_key';
+
 export class MikroOrmTransactionRunner implements TransactionRunner {
-  constructor(private readonly orm: MikroORM) {}
+  constructor(
+    private readonly orm: MikroORM,
+    private readonly onConflict: (type: ConflictType) => void = () => {},
+  ) {}
 
   async run<T>(work: (repositories: TransactionalRepositories) => Promise<T>): Promise<T> {
     try {
@@ -32,9 +38,20 @@ export class MikroOrmTransactionRunner implements TransactionRunner {
         return await work(createRepositories(em));
       });
     } catch (error) {
+      const conflict = conflictTypeOf(error);
+      if (conflict) this.onConflict(conflict);
       throw translateDatabaseError(error);
     }
   }
+}
+
+function conflictTypeOf(error: unknown): ConflictType | undefined {
+  if (error instanceof ConcurrencyConflictError) return 'version_conflict';
+  if (error instanceof UniqueConstraintViolationException) return 'duplicate_key';
+  const code = errorCode(error) ?? errorCode((error as { cause?: unknown })?.cause);
+  if (code === '55P03') return 'lock_timeout';
+  if (code === '40P01' || code === '40001') return 'deadlock';
+  return undefined;
 }
 
 /** Converte erros do banco/driver nos erros que a application entende. */

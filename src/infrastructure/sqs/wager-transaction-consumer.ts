@@ -75,7 +75,7 @@ export class WagerTransactionConsumer {
       } catch (error) {
         if (this.stopRequested) break;
         // SQS fora do ar, por exemplo: espera um pouco e tenta de novo (o loop nunca morre).
-        this.logger.warn(`Polling failed: ${errorMessage(error)}`);
+        this.logger.warn({ event: 'sqs_polling_failed', reason: errorMessage(error) });
         await sleep(1_000);
       }
     }
@@ -113,7 +113,7 @@ export class WagerTransactionConsumer {
       } catch (error) {
         // Ex.: o ack (DeleteMessage) falhou. Não mexemos na mensagem: ela volta sozinha depois do
         // visibility timeout e a inbox garante o replay. Segue para a próxima.
-        this.logger.error(`Message ${messages[i]!.MessageId} not acknowledged: ${errorMessage(error)}`);
+        this.logger.error({ event: 'sqs_ack_failed', sqsMessageId: messages[i]!.MessageId, reason: errorMessage(error) });
       }
     }
     return messages.length;
@@ -148,7 +148,7 @@ export class WagerTransactionConsumer {
         try {
           await this.processWagerTransaction.recordFailure(command, context);
         } catch (recordError) {
-          this.logger.error(`Could not record FAILED transaction: ${errorMessage(recordError)}`);
+          this.logger.error({ event: 'record_failed_transaction_failed', messageId: context.inbox!.messageId, reason: errorMessage(recordError) });
         }
         return this.deadLetter(message, 'MAX_ATTEMPTS_EXCEEDED', error);
       }
@@ -178,7 +178,14 @@ export class WagerTransactionConsumer {
         VisibilityTimeout: delaySeconds,
       }),
     );
-    this.logger.warn(`Transient failure (attempt ${receiveCount}/${this.config.maxAttempts}), retrying in ${delaySeconds}s: ${errorMessage(error)}`);
+    this.logger.warn({
+      event: 'sqs_retry_scheduled',
+      sqsMessageId: message.MessageId,
+      attempt: receiveCount,
+      maxAttempts: this.config.maxAttempts,
+      delaySeconds,
+      reason: errorMessage(error),
+    });
     this.onAction('retry-scheduled', { messageId: message.MessageId, reason: errorMessage(error) });
     return 'retry-scheduled';
   }
@@ -202,7 +209,7 @@ export class WagerTransactionConsumer {
       }),
     );
     await this.sqs.send(new DeleteMessageCommand({ QueueUrl: this.queues.queueUrl, ReceiptHandle: message.ReceiptHandle }));
-    this.logger.error(`Message sent to DLQ (${reason}): ${errorMessage(error)}`);
+    this.logger.error({ event: 'sqs_message_dead_lettered', sqsMessageId: message.MessageId, reason, error: errorMessage(error) });
     this.onAction('dead-lettered', { messageId: message.MessageId, reason });
     return 'dead-lettered';
   }

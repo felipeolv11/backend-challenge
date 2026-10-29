@@ -5,6 +5,7 @@ import type { ProcessWagerTransaction } from '../../application/process-wager-tr
 import { PublishOutbox } from '../../application/publish-outbox';
 import type { RetryPendingReferences } from '../../application/retry-pending-references';
 import type { ConsumerConfig, OutboxPublisherConfig, PendingReferenceConfig, QueueNames } from '../../config';
+import type { Metrics } from '../observability/metrics';
 import { getQueueUrl } from '../sqs/sqs-client';
 import { SqsEventPublisher } from '../sqs/sqs-event-publisher';
 import { WagerTransactionConsumer } from '../sqs/wager-transaction-consumer';
@@ -26,6 +27,7 @@ export interface BackgroundWorkersDependencies {
   runner: TransactionRunner;
   processWagerTransaction: ProcessWagerTransaction;
   retryPendingReferences: RetryPendingReferences;
+  metrics: Metrics;
 }
 
 /**
@@ -66,6 +68,11 @@ export class BackgroundWorkers {
     if (flags.pendingReferenceWorker) {
       this.pendingReferenceWorker = new PeriodicWorker('PendingReferenceWorker', pendingReferenceConfig.pollIntervalMs, async () => {
         const result = await this.deps.retryPendingReferences.runOnce();
+        const { metrics } = this.deps;
+        metrics.pendingReferenceOutcomes.inc({ outcome: 'processed' }, result.processed);
+        metrics.pendingReferenceOutcomes.inc({ outcome: 'rejected' }, result.rejected);
+        metrics.pendingReferenceOutcomes.inc({ outcome: 'still_pending' }, result.stillPending);
+        metrics.retries.inc({ component: 'pending_reference_worker' }, result.stillPending);
         const handled = result.processed + result.rejected + result.stillPending + result.skipped;
         return handled >= pendingReferenceConfig.batchSize; // lote cheio: provavelmente há mais
       });
@@ -77,9 +84,24 @@ export class BackgroundWorkers {
     if (!urls) return; // pediram para parar antes de as filas aparecerem
 
     if (flags.outboxPublisher) {
-      const publisher = new PublishOutbox(this.deps.runner, new SqsEventPublisher(this.deps.sqs, urls.events), outboxConfig.batchSize);
+      const publisher = new PublishOutbox(
+        this.deps.runner,
+        new SqsEventPublisher(this.deps.sqs, urls.events),
+        outboxConfig.batchSize,
+        (message, error) => {
+          this.deps.metrics.retries.inc({ component: 'outbox_publisher' });
+          this.logger.warn({
+            event: 'outbox_publish_failed',
+            eventId: message.id,
+            eventType: message.eventType,
+            attempts: message.attempts,
+            reason: error instanceof Error ? error.message : String(error),
+          });
+        },
+      );
       this.outboxWorker = new PeriodicWorker('OutboxPublisher', outboxConfig.pollIntervalMs, async () => {
         const result = await publisher.publishBatch();
+        this.deps.metrics.eventsPublished.inc(result.published);
         return result.claimed >= outboxConfig.batchSize;
       });
       this.outboxWorker.start();
@@ -91,10 +113,14 @@ export class BackgroundWorkers {
         { queueUrl: urls.wager, deadLetterQueueUrl: urls.deadLetter },
         this.deps.processWagerTransaction,
         this.deps.consumerConfig,
+        (action, details) => {
+          if (action === 'retry-scheduled') this.deps.metrics.retries.inc({ component: 'sqs_consumer' });
+          if (action === 'dead-lettered') this.deps.metrics.deadLetters.inc({ reason: details.reason ?? 'UNKNOWN' });
+        },
       );
       this.consumer.start();
     }
-    this.logger.log(`Workers started: ${JSON.stringify(flags)}`);
+    this.logger.log({ event: 'workers_started', ...flags });
   }
 
   /** Tenta achar as filas até conseguir (SQS ainda subindo, setup ainda não rodou...). */
@@ -108,7 +134,7 @@ export class BackgroundWorkers {
           events: await getQueueUrl(sqs, queueNames.eventsQueue),
         };
       } catch (error) {
-        this.logger.warn(`SQS queues not available yet (${error instanceof Error ? error.message : String(error)}); retrying in 2s`);
+        this.logger.warn({ event: 'sqs_queues_not_ready', reason: error instanceof Error ? error.message : String(error), retryInSeconds: 2 });
         await new Promise((resolve) => setTimeout(resolve, 2_000));
       }
     }

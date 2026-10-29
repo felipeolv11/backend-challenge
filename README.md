@@ -37,6 +37,18 @@ Para enviar uma transação pela fila (formato da seção 10 do enunciado):
 aws --endpoint-url http://localhost:4566 sqs send-message   --queue-url http://localhost:4566/000000000000/wager-transactions.fifo   --message-group-id <walletId> --message-deduplication-id msg-123   --message-body '{"messageId":"msg-123","type":"WagerTransactionRequested","occurredAt":"2026-07-29T15:00:00.000Z","data":{...}}'
 ```
 
+## Observabilidade
+
+| Endpoint | O que mostra |
+|---|---|
+| `GET /health/live` | Processo vivo |
+| `GET /health/ready` | PostgreSQL e SQS alcançáveis (200 ou 503 com o estado de cada um) |
+| `GET /metrics` | Métricas no formato Prometheus (transações por status, duplicatas, retries, DLQ, conflitos de lock, outbox lag, latência) |
+
+Os logs saem em JSON (uma linha por evento) com `correlationId`, `messageId`, `transactionId`,
+`walletId` e `providerId`, sem valores financeiros. Detalhes em
+[`ARCHITECTURE.md`](ARCHITECTURE.md#9-observabilidade).
+
 ## API
 
 | Método e rota | O que faz |

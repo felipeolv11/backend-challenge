@@ -581,7 +581,59 @@ créditos e débitos **no banco** (NUMERIC, exato) e compara. Divergência é **
 listener (`DivergenceListener`) _(log estruturado e métrica: etapa de observabilidade)_.
 
 ## 9. Observabilidade
-_(a definir)_
+
+### 9.1 Health checks (abertos, sem autenticação)
+
+| Endpoint | Responde |
+|---|---|
+| `GET /health/live` | 200 se o processo está vivo. **Não** olha dependências: reiniciar o processo não conserta um banco fora do ar |
+| `GET /health/ready` | 200 se PostgreSQL (`SELECT 1`) e SQS (`GetQueueUrl`) respondem; senão **503** com o estado de cada um. Cada verificação tem timeout de 2s, para uma dependência travada não travar o health |
+
+Feitos à mão (cerca de 40 linhas). Alternativa descartada: `@nestjs/terminus`, que é mais uma
+dependência e não tem verificação pronta para SQS.
+
+### 9.2 Logs estruturados
+
+Logger JSON embutido do NestJS (`ConsoleLogger({ json: true })`), sem dependência nova. Cada
+linha é um JSON; os eventos de negócio são objetos com campo `event`:
+
+```json
+{"level":"log","context":"WagerTransaction","message":{"event":"wager_transaction_handled",
+ "correlationId":"...","messageId":"...","providerId":"provider-a","externalTransactionId":"...",
+ "walletId":"...","transactionId":"...","kind":"BET","status":"PROCESSED","failureCode":null,
+ "idempotentReplay":false,"durationMs":12}}
+```
+
+- Campos de rastreio: `correlationId` (header `X-Correlation-Id` ou gerado; na fila, o
+  `messageId`), `messageId`, `transactionId`, `walletId`, `providerId`.
+- **Sem dados sensíveis nem payload financeiro:** valores e saldos **não** são logados (há um
+  teste que captura o stdout e confere isso). A exceção é a diferença de uma divergência na
+  reconciliação, necessária para o diagnóstico.
+- Eventos logados: transação tratada/falhou, retry agendado, mensagem na DLQ, falha de ack,
+  falha de publicação da outbox, divergência de reconciliação e falha de rodada de worker.
+- Alternativa descartada: pino + nestjs-pino (duas dependências, por uma performance que não
+  precisamos).
+
+### 9.3 Métricas (`GET /metrics`, formato Prometheus, `prom-client`)
+
+| Métrica (seção 12) | Nome |
+|---|---|
+| Transações por status | `wagering_transactions_total{status,kind,source}` (só transações novas) |
+| Duplicatas detectadas | `wagering_duplicates_detected_total{source,reason}` (`idempotent_replay` no HTTP, `redelivery` na fila) |
+| Retries | `wagering_retries_total{component}` (`sqs_consumer`, `outbox_publisher`, `pending_reference_worker`) |
+| Mensagens em DLQ | `wagering_dlq_messages_total{reason}` |
+| Conflitos de lock | `wagering_lock_conflicts_total{type}` (`lock_timeout`, `deadlock`, `version_conflict`, `duplicate_key`) |
+| Outbox lag | `wagering_outbox_lag_seconds` (idade do evento pendente mais antigo, lida do banco a cada coleta) e `wagering_outbox_pending_events` |
+| Latência de processamento | `wagering_processing_duration_seconds{source,outcome}` (histograma: p50/p95/p99) |
+| Extras | `wagering_reconciliation_divergences_total`, `wagering_pending_reference_outcomes_total{outcome}`, `wagering_outbox_events_published_total`, métricas padrão do processo |
+
+- Cada app tem o seu `Registry` (e não o global), para os testes subirem mais de um app no mesmo processo.
+- A instrumentação do processamento fica numa subclasse do caso de uso
+  (`ObservedProcessWagerTransaction`, na infraestrutura): a application continua só com regra de
+  negócio, e HTTP e fila recebem a versão observada sem mudar nada.
+- O `/metrics` está aberto; em produção, ficaria numa porta ou rede interna.
+- Alternativa descartada: contadores próprios em JSON (histograma à mão, formato não lido por
+  nenhuma ferramenta).
 
 ## 10. Autenticação
 

@@ -44,8 +44,11 @@ export class HttpErrorFilter implements ExceptionFilter {
       response.setHeader('Retry-After', '1');
     }
     if (status >= 500) {
-      this.logger.error(`${code}: ${exception instanceof Error ? exception.message : String(exception)}`, {
+      this.logger.error({
+        event: 'http_request_failed',
+        code,
         correlationId: request.correlationId,
+        reason: exception instanceof Error ? exception.message : String(exception),
       });
     }
 

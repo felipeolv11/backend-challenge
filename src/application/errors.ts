@@ -17,6 +17,14 @@ export class InboxMessageConflictError extends Error {
   }
 }
 
+/** O recurso consultado não existe (GET). */
+export class NotFoundError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'NotFoundError';
+  }
+}
+
 /** Já existe wallet para este player + moeda. */
 export class WalletAlreadyExistsError extends Error {
   constructor(message: string) {

@@ -1,4 +1,5 @@
 import type { InboxMessage } from '../domain/inbox-message';
+import type { Money } from '../domain/money';
 import type { OutboxMessage } from '../domain/outbox-message';
 import type { WagerTransaction } from '../domain/wager-transaction';
 import type { Wallet } from '../domain/wallet';
@@ -37,6 +38,16 @@ export interface WagerTransactionRepository {
 
 export interface LedgerRepository {
   insert(entry: WalletLedgerEntry): Promise<void>;
+  /** Página do extrato em ordem cronológica: lançamentos com id maior que afterEntryId. */
+  listByWallet(walletId: string, afterEntryId: string | undefined, limit: number): Promise<WalletLedgerEntry[]>;
+  /** Somas exatas (feitas no banco, em NUMERIC) de créditos e débitos, e a quantidade de lançamentos. */
+  totalsByWallet(walletId: string, currency: string): Promise<LedgerTotals>;
+}
+
+export interface LedgerTotals {
+  credits: Money;
+  debits: Money;
+  entries: number;
 }
 
 export interface InboxRepository {

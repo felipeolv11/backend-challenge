@@ -3,12 +3,14 @@ import { ConcurrencyConflictError } from '../../application/errors';
 import type {
   InboxRepository,
   LedgerRepository,
+  LedgerTotals,
   OutboxRepository,
   TransactionalRepositories,
   WagerTransactionRepository,
   WalletRepository,
 } from '../../application/ports';
 import type { InboxMessage } from '../../domain/inbox-message';
+import { Money } from '../../domain/money';
 import type { OutboxMessage } from '../../domain/outbox-message';
 import type { WagerTransaction } from '../../domain/wager-transaction';
 import type { Wallet } from '../../domain/wallet';
@@ -19,6 +21,7 @@ import {
   ledgerEntryToRow,
   outboxMessageToRow,
   toInboxMessage,
+  toLedgerEntry,
   toWagerTransaction,
   toWallet,
   walletToRow,
@@ -121,6 +124,30 @@ export class MikroOrmLedgerRepository implements LedgerRepository {
 
   async insert(entry: WalletLedgerEntry): Promise<void> {
     await this.em.insert(LedgerEntryRecord, ledgerEntryToRow(entry));
+  }
+
+  async listByWallet(walletId: string, afterEntryId: string | undefined, limit: number): Promise<WalletLedgerEntry[]> {
+    // Keyset: WHERE wallet_id = ? AND id > ? ORDER BY id LIMIT ?  (usa o índice ledger_wallet_idx)
+    const where = afterEntryId ? { walletId, id: { $gt: afterEntryId } } : { walletId };
+    const rows = await this.em.find(LedgerEntryRecord, where, { ...readOptions, orderBy: { id: 'asc' }, limit });
+    return rows.map(toLedgerEntry);
+  }
+
+  async totalsByWallet(walletId: string, currency: string): Promise<LedgerTotals> {
+    // A soma é feita pelo Postgres em NUMERIC (exata) e volta como texto: nunca passa por number.
+    const [row] = await this.em.execute(
+      `SELECT COALESCE(SUM(amount) FILTER (WHERE direction = 'CREDIT'), 0)::numeric(20, 2)::text AS credits,
+              COALESCE(SUM(amount) FILTER (WHERE direction = 'DEBIT'), 0)::numeric(20, 2)::text AS debits,
+              count(*)::int AS entries
+         FROM wallet_ledger_entries
+        WHERE wallet_id = ?`,
+      [walletId],
+    );
+    return {
+      credits: Money.from({ amount: row!.credits, currency }),
+      debits: Money.from({ amount: row!.debits, currency }),
+      entries: row!.entries,
+    };
   }
 }
 

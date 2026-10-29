@@ -454,13 +454,68 @@ nunca são renomeados, só adicionados.
 | `PROCESSING_ERROR` | FAILED | Erro inesperado que persistiu após os retries | Contatar o operador; a transação fica auditável |
 
 ### 8.2 Status HTTP
-_(a definir na etapa da API)_
+
+O mesmo mapeamento em todos os endpoints (`src/http/error-filter.ts` e `wagering.controller.ts`).
+O provedor decide o que fazer **só pelo status**:
+
+| Status | Quando | O provedor deve... |
+|---|---|---|
+| 200 | Transação `PROCESSED` (nova ou replay) | Nada. Seguir |
+| 201 | Wallet criada | Nada |
+| 202 | `PENDING_REFERENCE`: aceita, aguardando a referência | Esperar o evento (ou consultar depois). **Não** reenviar outro id |
+| 400 | Payload inválido, `Idempotency-Key` ausente, cursor inválido | **Corrigir** o pedido. Reenviar igual não adianta |
+| 404 | Recurso não encontrado (GETs) | Conferir o id |
+| 409 | Conflito de idempotência / wallet já existe | **Não** é replay: investigar (mesma key usada para outra coisa) |
+| 422 | `REJECTED` por regra de negócio; o corpo traz `transactionId` e `failureCode` | Decidir pelo `failureCode` (tabela 8.1). Reenviar igual devolve o mesmo 422 |
+| 503 | Falha transitória (banco fora, lock demorou) + `Retry-After: 1` | **Reenviar com a mesma `Idempotency-Key`** |
+| 500 | Bug nosso | Avisar o operador; reenviar com a mesma key é seguro |
+
+- **Replay devolve o mesmo status do original** (200 → 200, 422 → 422), com `idempotentReplay: true`.
+- **Erros** têm sempre o formato `{ "error": { "code", "message", "details"? }, "correlationId" }`.
+- **Alternativa descartada:** 200 para tudo que foi gravado (PROCESSED/REJECTED/PENDING), que
+  obrigaria o provedor a ler o corpo para saber se foi rejeitado.
+- **Validação:** zod valida a forma (tipos, obrigatórios, tamanhos, UUIDs); as regras de valor
+  (formato do `amount`, moeda, `kind`) ficam no domínio, a única fonte da verdade. Alternativas
+  descartadas: class-validator + class-transformer (duas dependências e metadados de tipo) e
+  validação à mão (código repetitivo).
+
+### 8.3 Paginação do extrato
+
+`GET /wallets/:id/ledger?cursor=...&limit=50` usa **keyset pelo id** (UUID v7, ordenado pelo
+tempo): `WHERE wallet_id = ? AND id > ? ORDER BY id LIMIT ?`, em ordem cronológica. O cursor é o id
+do último item em base64url (opaco, com prefixo de versão `v1:`). É **estável**: lançamentos novos
+entram no fim e não deslocam páginas já lidas (testado). Busca `limit + 1` para saber se há
+próxima página sem `COUNT`.
+- **Alternativa descartada:** `OFFSET`, que não é estável e fica lento com offsets grandes.
+
+### 8.4 Reconciliação
+
+`POST /wallets/:id/reconciliation` trava a wallet (para ler saldo e ledger no mesmo instante), soma
+créditos e débitos **no banco** (NUMERIC, exato) e compara. Divergência é **sinalizada**
+(`consistent: false`, `difference`) e **não é corrigida**. O aviso para log e métrica é feito por um
+listener (`DivergenceListener`) _(log estruturado e métrica: etapa de observabilidade)_.
 
 ## 9. Observabilidade
 _(a definir)_
 
 ## 10. Autenticação
-_(a definir)_
+
+**Não implementada**, como a seção 2 permite: ela não vale pontos, e o tempo foi para correção
+financeira, concorrência e idempotência. O **ponto de extensão** está no código:
+`src/http/auth.guard.ts`, um `AuthGuard` no-op aplicado aos controllers de wallets e wagering.
+
+**Desenho que eu adotaria:**
+1. **Keycloak** no Docker Compose. Cada provedor é um *client* OAuth2 com **client credentials**.
+2. O provedor obtém um JWT e o envia em `Authorization: Bearer <token>`.
+3. O `AuthGuard` valida assinatura (JWKS do Keycloak), expiração, `iss` e `aud`.
+4. O `providerId` vem do token (ex.: claim `azp`) e fica na requisição.
+5. O controller confere que o `providerId` do **payload** é o do **token** (senão 403): um
+   provedor não lança transações em nome de outro.
+6. Health checks ficam abertos. A fila é canal interno confiável, mas o `providerId` da mensagem
+   continua passando pelas mesmas validações de domínio.
+
+**Alternativa descartada agora:** integrar o Keycloak. Consumiria boa parte do prazo em algo que
+não pontua.
 
 ## 11. Limitações conhecidas
 _(a definir)_

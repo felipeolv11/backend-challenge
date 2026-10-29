@@ -10,6 +10,10 @@ import baseConfig from '../../src/infrastructure/database/mikro-orm.config';
 //              Windows com Bun.
 export const TEST_DATABASE_NAME = 'wagering_test';
 
+export function testDatabaseUrl(): string {
+  return databaseUrl(TEST_DATABASE_NAME);
+}
+
 function databaseUrl(databaseName: string): string {
   const url = new URL(process.env.DATABASE_URL!);
   url.pathname = `/${databaseName}`;

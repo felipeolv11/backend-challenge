@@ -81,6 +81,7 @@ export class Wallet {
       money: props.initialBalance,
       balanceBefore: Money.zero(currency),
       balanceAfter: props.initialBalance,
+      walletVersion: 1,
       createdAt: props.at,
     });
     return { wallet, openingEntry };
@@ -131,6 +132,9 @@ export class Wallet {
   private applyMovement(direction: LedgerDirection, props: WalletMovementProps): WalletLedgerEntry {
     const balanceBefore = this._balance;
     const balanceAfter = direction === LedgerDirection.Debit ? balanceBefore.subtract(props.money) : balanceBefore.add(props.money);
+    // Enunciado: version incrementa somente quando o saldo muda.
+    // Como o valor é sempre > 0, todo debit/credit bem-sucedido muda o saldo.
+    const versionAfter = this._version + 1;
 
     // O lançamento é criado ANTES de alterar o estado: se a criação falhar, a wallet
     // continua exatamente como estava.
@@ -142,13 +146,12 @@ export class Wallet {
       money: props.money,
       balanceBefore,
       balanceAfter,
+      walletVersion: versionAfter,
       createdAt: props.at,
     });
 
     this._balance = balanceAfter;
-    // Enunciado: version incrementa somente quando o saldo muda.
-    // Como o valor é sempre > 0, todo debit/credit bem-sucedido muda o saldo.
-    this._version += 1;
+    this._version = versionAfter;
     this._updatedAt = props.at;
     return entry;
   }

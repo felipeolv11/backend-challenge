@@ -49,6 +49,7 @@ describe('Wallet.open', () => {
     expect(openingEntry!.transactionId).toBe('tx-opening');
     expect(openingEntry!.balanceBefore.toJSON().amount).toBe('0.00');
     expect(openingEntry!.balanceAfter.toJSON().amount).toBe('1000.00');
+    expect(openingEntry!.walletVersion).toBe(1);
   });
 
   test('com saldo zero: version 1 e nenhum lançamento', () => {
@@ -84,6 +85,7 @@ describe('Wallet.debit', () => {
     expect(entry.walletId).toBe('wallet-1');
     expect(entry.balanceBefore.toJSON().amount).toBe('100.00');
     expect(entry.balanceAfter.toJSON().amount).toBe('75.00');
+    expect(entry.walletVersion).toBe(2); // o lançamento carrega a version da wallet depois dele
   });
 
   test('pode debitar exatamente o saldo inteiro (saldo final 0.00)', () => {

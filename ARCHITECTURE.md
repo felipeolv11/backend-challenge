@@ -127,6 +127,7 @@ PostgreSQL real**, sem passar pelo domínio: o banco recusa sozinho.
 | `version` sobe 1 só quando o saldo muda | trigger `wallets_guard_update` |
 | Aritmética do lançamento | `ledger_arithmetic` CHECK (antes ± valor = depois) |
 | Um lançamento por transação por wallet | `ledger_one_entry_per_transaction_per_wallet` UNIQUE |
+| Corrente do ledger sem bifurcação (lost update) | `ledger_one_entry_per_wallet_version` UNIQUE `(wallet_id, wallet_version)`, da migration 2 (ver §5.1) |
 | Ledger imutável | triggers `ledger_append_only` (UPDATE/DELETE) e `ledger_no_truncate` |
 | Idempotência | `wager_tx_provider_idempotency_key_unique` e `wager_tx_provider_external_id_unique` |
 | Uma reversão por referência (regra 4) | índice único parcial `wager_tx_one_reversal_per_reference` |
@@ -156,8 +157,12 @@ PostgreSQL real**, sem passar pelo domínio: o banco recusa sozinho.
   (ex.: `wallets_player_currency_unique` → 409).
 - **Trade-off:** o banco não verifica que `wallets.balance` é igual ao último `balance_after` do
   ledger (isso exigiria um trigger entre tabelas a cada operação). Essa consistência é garantida
-  pelo domínio (`debit`/`credit` sempre devolvem o lançamento), pela transação SQL única e é
-  **verificada** pela reconciliação.
+  pelo domínio (`debit`/`credit` sempre devolvem o lançamento), pela transação SQL única, pela
+  corrente `UNIQUE (wallet_id, wallet_version)` e é **verificada** pela reconciliação.
+- **Migration 2 (`ledger_wallet_version`)** mostra uma evolução de schema com **backfill**: os
+  lançamentos existentes são numerados pela ordem dos ids (UUID v7). Como o ledger não aceita
+  UPDATE, o trigger é desligado **só durante o backfill**, dentro da transação da migration, e o
+  teste confirma que ele volta ligado.
 
 **Banco de teste:** os testes de integração usam o PostgreSQL do Compose num banco separado
 (`wagering_test`), criado automaticamente e recriado do zero (migrations) a cada arquivo. Alternativa
@@ -230,10 +235,101 @@ Criar evento a partir de estado errado é bug (`InvalidEventSourceError`).
 ---
 
 ## 5. Concorrência
-_(a definir)_
+
+**Unidade de concorrência: a wallet.** Cada operação roda numa transação SQL (READ COMMITTED)
+e começa travando **só a linha da wallet** envolvida. Não existe lock global.
+
+### 5.1 Três camadas de proteção contra lost update
+
+| Camada | Onde | O que faz |
+|---|---|---|
+| 1. Lock pessimista | `WalletRepository.findByIdForUpdate()` → `SELECT ... FOR UPDATE` | A 2ª operação na mesma wallet **espera** a 1ª terminar e já lê o saldo atualizado. É a proteção do dia a dia: não há colisão nem retry |
+| 2. Checagem de version | `WalletRepository.updateBalance()` → `UPDATE ... WHERE id = ? AND version = ?` | Se a wallet mudou entre a leitura e a gravação, nenhuma linha é afetada e a operação falha (`ConcurrencyConflictError`, transitório) |
+| 3. Corrente do ledger no banco | `UNIQUE (wallet_id, wallet_version)` em `wallet_ledger_entries` (migration 2) | Cada lançamento guarda a version da wallet depois dele. Dois lançamentos "continuando" do mesmo ponto são recusados **pelo banco**, mesmo sem as camadas 1 e 2 |
+
+**Por que lock pessimista (e não as alternativas):**
+- **Lock otimista com retry:** no cenário obrigatório de 50 apostas iguais em paralelo na
+  mesma wallet, quase todas conflitariam e entrariam em retry; esgotar os retries vira erro
+  para o provedor. O lock pessimista simplesmente enfileira.
+- **UPDATE condicional (`balance >= valor`):** rápido, mas a regra do saldo sairia da classe
+  `Wallet` e iria para o SQL, e o `wallet.debit()` deixaria de ser usado no caminho principal.
+- **Trade-off aceito:** numa wallet muito disputada ("hot wallet"), as operações entram em fila.
+  Continuam corretas; só não ficam paralelas *dentro da mesma wallet*. Wallets diferentes seguem
+  100% em paralelo.
+
+**`lock_timeout = 5s`** (`SET LOCAL` em cada transação): uma transação não espera um lock para
+sempre. Estourou, vira `TransientInfrastructureError` (HTTP 503 / a mensagem da fila volta para retry).
+
+**Deadlock:** cada operação trava uma única wallet, então não há espera circular entre wallets.
+
+### 5.2 Como foi provado (testes de mutação)
+
+Os testes de concorrência (`test/integration/concurrency/`) usam paralelismo real: `Promise.all`,
+cada chamada na sua transação e na sua conexão do pool do Postgres. Foram executados com
+proteções removidas de propósito:
+
+| Mutação | Resultado |
+|---|---|
+| Nenhuma | 15/15 passam |
+| Sem lock (camada 1) | A camada 2 segura: as operações concorrentes falham com `ConcurrencyConflictError`, e **nenhum dado errado é gravado** |
+| Sem lock e sem checagem de version (1 e 2), **antes** da camada 3 | **Lost update real:** as duas apostas de 80 foram aceitas com saldo 100. Nenhum CHECK ou trigger percebia, porque cada linha, sozinha, estava certa. Isso motivou a camada 3 |
+| Sem lock e sem checagem de version, **com** a camada 3 | O banco recusa o lançamento duplicado; o caso de uso tenta de novo e rejeita com `INSUFFICIENT_FUNDS`. 12/15 passam; os 3 que falham (disputa pesada, segunda colisão no retry único) falham com **erro**, nunca com saldo errado |
+
+### 5.3 Ordem das gravações na transação
+
+1. `SELECT ... FOR UPDATE` na wallet;
+2. inbox (se veio da fila): já existe?;
+3. idempotência: a transação já existe?;
+4. decisão (domínio) → `INSERT` da transação → `INSERT` do lançamento → `UPDATE` da wallet
+   (com version) → `INSERT` dos eventos na outbox → `INSERT` da inbox;
+5. commit.
 
 ## 6. Idempotência
-_(a definir)_
+
+**A chave é o header `Idempotency-Key`** (fonte da verdade), única **por provider** no banco.
+A mesma transação externa (`providerId + externalTransactionId`) também é única.
+
+**Hash do payload** (`src/application/payload-hash.ts`): **SHA-256 (hex) de um JSON canônico**,
+com chaves ordenadas em todos os níveis, contendo só os campos de negócio: `providerId`,
+`externalTransactionId`, `playerId`, `walletId`, `roundId`, `gameId`, `kind`,
+`money.amount`, `money.currency` e `referenceExternalTransactionId` (`null` se ausente).
+O header e metadados de transporte (messageId, occurredAt) ficam de fora.
+
+| Situação | Resultado |
+|---|---|
+| Mesma key + mesmo hash | **Replay:** devolve o resultado original (status, `failureCode` e o saldo observado **naquele momento**, coluna `balance_after`) com `idempotentReplay: true`. Nada é gravado de novo |
+| Mesma key + hash diferente | `IdempotencyConflictError`: conflito, **não** replay |
+| Mesmo `externalTransactionId` + key diferente | `IdempotencyConflictError` |
+| Duas requisições iguais ao mesmo tempo | O lock da wallet serializa: a 2ª só olha a idempotência depois do commit da 1ª e vê o replay. Sem wallet para travar (`WALLET_NOT_FOUND`), a 2ª bate na constraint UNIQUE (`DuplicateRecordError`); o caso de uso tenta de novo **uma vez** e encontra o replay |
+
+**Nada de cache em memória:** toda a deduplicação é feita por constraints e consultas no PostgreSQL.
+
+**Teste:** a mesma aposta enviada 50 vezes em paralelo gera 1 transação, 1 débito e 49 replays
+idênticos (inclusive o saldo observado).
+
+### 6.1 Organização da camada de aplicação (portas)
+
+O caso de uso (`ProcessWagerTransaction`) depende só de **interfaces** (`src/application/ports.ts`):
+`WalletRepository`, `WagerTransactionRepository`, `LedgerRepository`, `InboxRepository`,
+`OutboxRepository` e `TransactionRunner`. A infraestrutura implementa com MikroORM
+(`src/infrastructure/database/`).
+
+- **Por quê:** o caso de uso tem só regra de negócio, sem SQL nem ORM, e a fronteira entre camadas
+  fica explícita. O teste de atomicidade troca a porta da outbox por uma que falha.
+- **Alternativa descartada:** o caso de uso usar o `EntityManager` direto, o que acoplaria a
+  application ao ORM.
+
+**Gravação com comandos explícitos** (`em.insert` / `em.nativeUpdate`), na ordem das FKs,
+dentro de `em.transactional()`. As leituras usam `disableIdentityMap`, então nada é gravado
+"por baixo".
+- **Alternativa descartada:** Unit of Work (`persist` + `flush`). A ordem e o controle da version
+  ficariam implícitos, e o versionamento automático do ORM incrementaria a version uma segunda vez.
+
+**Entidades de banco com `defineEntity`** (recomendado pelo MikroORM 7, sem dependência extra).
+Os valores `NUMERIC` chegam como **string** e vão direto para `Money.from()`.
+
+**`WagerTransactionProcessor`** separa a **decisão** (PROCESSED / REJECTED / PENDING_REFERENCE)
+do caso de uso, para ser reutilizado pelo worker de referências pendentes.
 
 ## 7. Modelo de domínio e transições de estado
 

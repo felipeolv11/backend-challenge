@@ -14,6 +14,13 @@ export interface CreateLedgerEntryProps {
   money: Money;
   balanceBefore: Money;
   balanceAfter: Money;
+  /**
+   * version da wallet DEPOIS deste lançamento (abertura = 1). Como a version sobe exatamente 1
+   * a cada mudança de saldo, cada lançamento ocupa uma posição única na "corrente" da wallet:
+   * o banco tem UNIQUE (wallet_id, wallet_version), então dois lançamentos continuando do mesmo
+   * ponto (lost update) são recusados mesmo que o código perca as outras proteções.
+   */
+  walletVersion: number;
   createdAt: Date;
 }
 
@@ -34,6 +41,7 @@ export class WalletLedgerEntry {
     public readonly money: Money,
     public readonly balanceBefore: Money,
     public readonly balanceAfter: Money,
+    public readonly walletVersion: number,
     public readonly createdAt: Date,
   ) {
     // readonly só vale para o TypeScript; o freeze garante a imutabilidade também em runtime.
@@ -47,6 +55,9 @@ export class WalletLedgerEntry {
     }
     if (props.balanceBefore.isNegative() || props.balanceAfter.isNegative()) {
       throw new InvalidLedgerEntryError('Ledger entry balances cannot be negative');
+    }
+    if (!Number.isInteger(props.walletVersion) || props.walletVersion < 1) {
+      throw new InvalidLedgerEntryError('Ledger entry walletVersion must be an integer >= 1');
     }
 
     const entry = WalletLedgerEntry.fromProps(props);
@@ -81,6 +92,7 @@ export class WalletLedgerEntry {
       props.money,
       props.balanceBefore,
       props.balanceAfter,
+      props.walletVersion,
       props.createdAt,
     );
   }

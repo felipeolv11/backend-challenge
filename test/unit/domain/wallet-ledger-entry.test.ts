@@ -15,6 +15,7 @@ function props(overrides: Partial<CreateLedgerEntryProps> = {}): CreateLedgerEnt
     money: brl('80.00'),
     balanceBefore: brl('100.00'),
     balanceAfter: brl('20.00'),
+    walletVersion: 2,
     createdAt: at,
     ...overrides,
   };
@@ -57,6 +58,11 @@ describe('WalletLedgerEntry.create', () => {
       CurrencyMismatchError,
     );
   });
+});
+
+test('walletVersion precisa ser inteiro >= 1', () => {
+  expect(() => WalletLedgerEntry.create(props({ walletVersion: 0 }))).toThrow(InvalidLedgerEntryError);
+  expect(() => WalletLedgerEntry.create(props({ walletVersion: 1.5 }))).toThrow(InvalidLedgerEntryError);
 });
 
 describe('WalletLedgerEntry — imutabilidade estrutural', () => {

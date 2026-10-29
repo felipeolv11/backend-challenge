@@ -21,7 +21,7 @@ export class WalletBalanceChanged extends IntegrationEvent<WalletBalanceChangedD
 
   /** Chamar logo depois do debit/credit, com a wallet já atualizada. */
   static from(wallet: Wallet, entry: WalletLedgerEntry, ctx: EventContext): WalletBalanceChanged {
-    if (entry.walletId !== wallet.id || !entry.balanceAfter.equals(wallet.balance)) {
+    if (entry.walletId !== wallet.id || !entry.balanceAfter.equals(wallet.balance) || entry.walletVersion !== wallet.version) {
       throw new InvalidEventSourceError(`Ledger entry ${entry.id} does not match the current state of wallet ${wallet.id}`);
     }
     return new WalletBalanceChanged({

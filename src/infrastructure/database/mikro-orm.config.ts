@@ -1,5 +1,6 @@
 import { defineConfig } from '@mikro-orm/postgresql';
 import { Migrator } from '@mikro-orm/migrations';
+import { allEntities } from './entities';
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {
@@ -11,9 +12,7 @@ const migrationsPath = './src/infrastructure/database/migrations';
 
 export default defineConfig({
   clientUrl: databaseUrl,
-  // As entidades de banco entram na etapa do schema.
-  entities: [],
-  discovery: { warnWhenNoEntities: false },
+  entities: allEntities,
   extensions: [Migrator],
   migrations: {
     tableName: 'mikro_orm_migrations',

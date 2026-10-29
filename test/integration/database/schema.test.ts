@@ -79,20 +79,33 @@ async function insertLedger(row: {
   amount?: string;
   before?: string;
   after?: string;
+  walletVersion?: number;
 }) {
   const id = newId();
   await sql(
     `INSERT INTO wallet_ledger_entries
-       (id, wallet_id, transaction_id, direction, amount, currency, balance_before, balance_after, created_at)
-     VALUES (?, ?, ?, ?, ?, 'BRL', ?, ?, now())`,
-    [id, row.walletId, row.transactionId, row.direction ?? 'DEBIT', row.amount ?? '10.00', row.before ?? '100.00', row.after ?? '90.00'],
+       (id, wallet_id, transaction_id, direction, amount, currency, balance_before, balance_after, wallet_version, created_at)
+     VALUES (?, ?, ?, ?, ?, 'BRL', ?, ?, ?, now())`,
+    [
+      id,
+      row.walletId,
+      row.transactionId,
+      row.direction ?? 'DEBIT',
+      row.amount ?? '10.00',
+      row.before ?? '100.00',
+      row.after ?? '90.00',
+      row.walletVersion ?? ++ledgerVersionSequence,
+    ],
   );
   return id;
 }
 
+// Cada lançamento de teste ganha uma wallet_version nova, para não colidir sem querer.
+let ledgerVersionSequence = 1;
+
 describe('migrations', () => {
   test('são reversíveis: down remove tudo e up recria', async () => {
-    await orm.migrator.down();
+    await orm.migrator.down({ to: 0 });
     const afterDown = await sql(
       `SELECT count(*)::int AS total FROM information_schema.tables
        WHERE table_schema = 'public' AND table_name <> 'mikro_orm_migrations'`,
@@ -111,6 +124,54 @@ describe('migrations', () => {
       'wallet_ledger_entries',
       'wallets',
     ]);
+  });
+});
+
+describe('migration 2: wallet_version no ledger', () => {
+  test('faz backfill dos lançamentos existentes na ordem dos ids, e o trigger volta ligado', async () => {
+    // Volta para o schema da migration 1 (sem wallet_version) e grava lançamentos "antigos".
+    await orm.migrator.down();
+    const walletId = await insertWallet({ balance: '70.00' });
+    const ids: string[] = [];
+    const oldEntries = [
+      { direction: 'CREDIT', amount: '100.00', before: '0.00', after: '100.00' },
+      { direction: 'DEBIT', amount: '20.00', before: '100.00', after: '80.00' },
+      { direction: 'DEBIT', amount: '10.00', before: '80.00', after: '70.00' },
+    ];
+    for (const { direction, amount, before, after } of oldEntries) {
+      const transactionId = await insertTx({ walletId });
+      const id = newId();
+      await sql(
+        `INSERT INTO wallet_ledger_entries
+           (id, wallet_id, transaction_id, direction, amount, currency, balance_before, balance_after, created_at)
+         VALUES (?, ?, ?, ?, ?, 'BRL', ?, ?, now())`,
+        [id, walletId, transactionId, direction, amount, before, after],
+      );
+      ids.push(id);
+    }
+
+    await orm.migrator.up();
+
+    const rows = await sql(`SELECT id, wallet_version FROM wallet_ledger_entries WHERE wallet_id = ? ORDER BY id`, [walletId]);
+    expect(rows.map((r) => r.wallet_version)).toEqual([1, 2, 3]);
+    // O trigger de imutabilidade continua ativo depois da migration.
+    await expect(sql(`UPDATE wallet_ledger_entries SET amount = 1.00 WHERE id = ?`, [ids[0]])).rejects.toThrow(/append-only/);
+  });
+
+  test('dois lançamentos com a mesma wallet_version são recusados (lost update)', async () => {
+    const walletId = await insertWallet();
+    // Os dois "continuam" do saldo 100 com version 2: é o que um lost update produziria.
+    await insertLedger({ walletId, transactionId: await insertTx({ walletId }), before: '100.00', after: '20.00', amount: '80.00', walletVersion: 2 });
+    await expect(
+      insertLedger({ walletId, transactionId: await insertTx({ walletId }), before: '100.00', after: '20.00', amount: '80.00', walletVersion: 2 }),
+    ).rejects.toThrow(/ledger_one_entry_per_wallet_version/);
+  });
+
+  test('wallet_version precisa ser >= 1', async () => {
+    const walletId = await insertWallet();
+    await expect(insertLedger({ walletId, transactionId: await insertTx({ walletId }), walletVersion: 0 })).rejects.toThrow(
+      /ledger_wallet_version_positive/,
+    );
   });
 });
 

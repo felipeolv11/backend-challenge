@@ -1,0 +1,30 @@
+services:
+  postgres:
+    image: postgres:18.4-alpine
+    environment:
+      POSTGRES_USER: wagering
+      POSTGRES_PASSWORD: wagering
+      POSTGRES_DB: wagering
+    ports:
+      - "5432:5432"
+    volumes:
+      # A partir do Postgres 18 a imagem guarda os dados em /var/lib/postgresql/18/docker,
+      # por isso o volume aponta para /var/lib/postgresql (e não mais para .../data).
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wagering -d wagering"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  sqs:
+    # DECISÃO: MiniStack como emulador de SQS.
+    # POR QUÊ: o avaliador roda tudo com `docker compose up`, sem criar conta nem token.
+    #          Validado antes (FIFO, deduplicação, ordem, ApproximateReceiveCount e DLQ).
+    # ALTERNATIVA: LocalStack — não usei porque, desde março de 2026, exige conta e auth token.
+    image: ministackorg/ministack:1.5.34
+    ports:
+      - "4566:4566"
+
+volumes:
+  postgres-data:

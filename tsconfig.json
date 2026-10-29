@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "lib": ["ESNext"],
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleDetection": "force",
+    "moduleResolution": "bundler",
+    "types": ["bun"],
+    "noEmit": true,
+
+    // Necessários para o NestJS: ele usa decorators e lê os tipos do construtor
+    // para saber o que injetar (injeção de dependência).
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+
+    // TypeScript estrito, como o enunciado exige (seção 4).
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "skipLibCheck": true
+  },
+  "include": ["src", "test"]
+}

@@ -22,5 +22,8 @@ export default defineConfig({
     pathTs: migrationsPath,
     // Cada migration roda dentro de uma transação: se falhar no meio, nada fica pela metade.
     transactional: true,
+    // As migrations são escritas à mão em SQL; o snapshot automático só serve para gerá-las.
+    snapshot: false,
+    snapshotOnMigrate: false,
   },
 });

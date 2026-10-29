@@ -42,6 +42,8 @@ export interface WagerTransactionState extends CreateWagerTransactionProps {
   referenceTransactionId?: string;
   failureCode?: FailureCode;
   processedAt?: Date;
+  /** Saldo da wallet observado ao processar/rejeitar (devolvido no replay idempotente). */
+  balanceAfter?: Money;
 }
 
 export interface OpeningTransactionProps {
@@ -103,6 +105,7 @@ export class WagerTransaction {
     private _referenceTransactionId?: string,
     private _failureCode?: FailureCode,
     private _processedAt?: Date,
+    private _balanceAfter?: Money,
   ) {}
 
   /** Transação vinda do provedor. Nasce em PENDING. Lança InvalidWagerTransactionError se o payload for inválido. */
@@ -159,6 +162,7 @@ export class WagerTransaction {
       createdAt: props.at,
       status: WagerTransactionStatus.Processed,
       processedAt: props.at,
+      balanceAfter: props.money, // a wallet abre com saldo zero, então o saldo após a abertura é o próprio valor
     });
   }
 
@@ -183,13 +187,25 @@ export class WagerTransaction {
     return this._processedAt;
   }
 
+  // DECISÃO: guardar o saldo observado na própria transação (coluna balance_after).
+  // POR QUÊ: a regra 7 da seção 7 exige que o replay devolva "o saldo observado naquele momento".
+  //          Para LOSS e REJECTED não existe lançamento no ledger com esse saldo, então ele
+  //          precisa ficar na transação.
+  // ALTERNATIVA: guardar um snapshot JSON da resposta HTTP — não usei porque misturaria o
+  //              formato da API com o dado financeiro, e um replay devolveria o formato antigo
+  //              se a resposta mudasse.
+  get balanceAfter(): Money | undefined {
+    return this._balanceAfter;
+  }
+
   // ---- transições
 
-  markProcessed(referenceTransactionId: string | undefined, at: Date): void {
+  markProcessed(referenceTransactionId: string | undefined, at: Date, balanceAfter: Money): void {
     this.assertCanTransition(WagerTransactionStatus.Processed);
     this._status = WagerTransactionStatus.Processed;
     this._referenceTransactionId = referenceTransactionId;
     this._processedAt = at;
+    this._balanceAfter = balanceAfter;
   }
 
   markPendingReference(): void {
@@ -201,10 +217,12 @@ export class WagerTransaction {
     this._status = WagerTransactionStatus.PendingReference;
   }
 
-  reject(code: FailureCode): void {
+  /** balanceAfter é opcional: com WALLET_NOT_FOUND, por exemplo, não existe saldo para observar. */
+  reject(code: FailureCode, balanceAfter?: Money): void {
     this.assertCanTransition(WagerTransactionStatus.Rejected);
     this._status = WagerTransactionStatus.Rejected;
     this._failureCode = code;
+    this._balanceAfter = balanceAfter;
   }
 
   fail(code: FailureCode): void {
@@ -330,6 +348,7 @@ export class WagerTransaction {
       state.referenceTransactionId,
       state.failureCode,
       state.processedAt,
+      state.balanceAfter,
     );
   }
 }

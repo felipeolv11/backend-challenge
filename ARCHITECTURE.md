@@ -115,7 +115,53 @@ serializados com sinal (`"-0.05"`).
 lançam `CurrencyMismatchError`. O projeto usa `BRL`, mas o modelo é multi-moeda.
 
 ### 3.5 Schema, constraints e índices
-_(a definir na etapa do schema)_
+
+Migration: `src/infrastructure/database/migrations/Migration20261029120000_initial_schema.ts`.
+Cada garantia abaixo é testada em `test/integration/database/schema.test.ts` **com SQL direto no
+PostgreSQL real**, sem passar pelo domínio: o banco recusa sozinho.
+
+| Garantia (seção 6) | Onde está no banco |
+|---|---|
+| Saldo nunca negativo | `wallets_balance_non_negative` CHECK; `ledger_balances_non_negative`; `wager_tx_balance_after_non_negative` |
+| Uma wallet por player + moeda | `wallets_player_currency_unique` UNIQUE |
+| `version` sobe 1 só quando o saldo muda | trigger `wallets_guard_update` |
+| Aritmética do lançamento | `ledger_arithmetic` CHECK (antes ± valor = depois) |
+| Um lançamento por transação por wallet | `ledger_one_entry_per_transaction_per_wallet` UNIQUE |
+| Ledger imutável | triggers `ledger_append_only` (UPDATE/DELETE) e `ledger_no_truncate` |
+| Idempotência | `wager_tx_provider_idempotency_key_unique` e `wager_tx_provider_external_id_unique` |
+| Uma reversão por referência (regra 4) | índice único parcial `wager_tx_one_reversal_per_reference` |
+| Estados terminais não mudam | trigger `wager_tx_guard_update` |
+| Dados do pedido imutáveis | trigger `wager_tx_guard_update` |
+| Transações e wallets não são apagadas | triggers `wager_tx_no_delete`, `wager_tx_no_truncate`, `wallets_no_delete` |
+| Inbox: dedup por `(consumer, messageId)` | `inbox_messages_pkey` |
+| Coerência status ⇄ campos | `wager_tx_failure_code_iff_failed`, `wager_tx_processed_at_iff_processed`, `wager_tx_processed_has_balance_after` |
+| Taxonomia fechada | `wager_tx_kind_valid`, `wager_tx_status_valid`, `wager_tx_failure_code_valid` |
+
+**Decisões do schema:**
+- **Imutabilidade por trigger** (e não por `REVOKE`): vale para qualquer cliente (app, script,
+  DBeaver) e funciona com um único usuário de banco. Alternativa descartada: dois usuários de
+  banco com permissões diferentes, que dá mais configuração e não protege contra o usuário dono.
+- **`TEXT + CHECK` em vez de `ENUM` do Postgres:** adicionar ou remover valores é uma migration
+  simples e reversível.
+- **Idempotência única por provider:** dois provedores podem usar a mesma `Idempotency-Key`
+  sem colidir, e a mesma transação externa com outra key é barrada.
+- **`balance_after` na transação:** guarda o saldo observado ao processar/rejeitar, para o replay
+  idempotente (regra 7). Alternativa descartada: snapshot JSON da resposta HTTP, que misturaria o
+  formato da API com o dado financeiro.
+- **Sem FK de `wager_transactions.wallet_id` para `wallets`:** uma transação `WALLET_NOT_FOUND`
+  também é gravada (auditoria e replay). O ledger tem FK para os dois.
+- **`reference_transaction_id` obrigatório em reversões `PROCESSED`:** sem isso, um `NULL`
+  escaparia do índice único de reversão.
+- **Constraints com nome explícito:** a aplicação identifica qual regra foi violada pelo nome
+  (ex.: `wallets_player_currency_unique` → 409).
+- **Trade-off:** o banco não verifica que `wallets.balance` é igual ao último `balance_after` do
+  ledger (isso exigiria um trigger entre tabelas a cada operação). Essa consistência é garantida
+  pelo domínio (`debit`/`credit` sempre devolvem o lançamento), pela transação SQL única e é
+  **verificada** pela reconciliação.
+
+**Banco de teste:** os testes de integração usam o PostgreSQL do Compose num banco separado
+(`wagering_test`), criado automaticamente e recriado do zero (migrations) a cada arquivo. Alternativa
+descartada: Testcontainers (dependência nova, mais lento, mais pontos de falha no Windows com Bun).
 
 ### 3.6 Conexão com o banco é "preguiçosa"
 

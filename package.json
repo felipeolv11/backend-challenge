@@ -11,7 +11,9 @@
     "migration:down": "bun run src/infrastructure/database/migrate.ts down",
     "migration:status": "bun run src/infrastructure/database/migrate.ts status",
     "typecheck": "bun check",
-    "test": "bun test"
+    "test": "bun test",
+    "test:unit": "bun test test/unit",
+    "test:integration": "bun test test/integration"
   },
   "dependencies": {
     "@mikro-orm/core": "7.2.5",

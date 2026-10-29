@@ -32,4 +32,9 @@ bun run start                 # sobe a API em http://localhost:3000
 | `bun run migration:down` | Desfaz a última migration |
 | `bun run migration:status` | Lista migrations executadas e pendentes |
 | `bun run typecheck` | Checagem de tipos (TypeScript estrito) |
-| `bun test` | Roda os testes |
+| `bun test` | Roda todos os testes (precisa de `infra:up`) |
+| `bun run test:unit` | Só os testes unitários (não precisa de Docker) |
+| `bun run test:integration` | Só os testes de integração (PostgreSQL real) |
+
+> Os testes de integração usam o PostgreSQL do Docker Compose, num banco separado (`wagering_test`),
+> criado automaticamente e recriado do zero a cada arquivo de teste. O banco de desenvolvimento não é tocado.

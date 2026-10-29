@@ -36,9 +36,9 @@ function newTx(kind = WagerTransactionKind.Bet, referenceExternalTransactionId?:
 describe('IntegrationEvent — envelope', () => {
   test('toJSON segue o envelope do enunciado, com eventType e version vindos do tipo', () => {
     const tx = newTx();
-    tx.markProcessed(undefined, at);
+    tx.markProcessed(undefined, at, brl('975.00'));
     // Compara o JSON que de fato vai para a fila (depois de stringify/parse).
-    const wire = JSON.parse(JSON.stringify(WagerTransactionProcessed.from(tx, brl('975.00'), ctx('evt-1'))));
+    const wire = JSON.parse(JSON.stringify(WagerTransactionProcessed.from(tx, ctx('evt-1'))));
 
     expect(wire).toEqual({
       eventId: 'evt-1',
@@ -68,16 +68,16 @@ describe('IntegrationEvent — envelope', () => {
 
   test('data carrega MoneyProps (strings), nunca instâncias de Money', () => {
     const tx = newTx();
-    tx.markProcessed(undefined, at);
-    const event = WagerTransactionProcessed.from(tx, brl('975.00'), ctx('evt-1'));
+    tx.markProcessed(undefined, at, brl('975.00'));
+    const event = WagerTransactionProcessed.from(tx, ctx('evt-1'));
     expect(event.data.money).not.toBeInstanceOf(Money);
     expect(typeof event.data.money.amount).toBe('string');
   });
 
   test('data é congelado (imutável)', () => {
     const tx = newTx();
-    tx.markProcessed(undefined, at);
-    const event = WagerTransactionProcessed.from(tx, brl('975.00'), ctx('evt-1'));
+    tx.markProcessed(undefined, at, brl('975.00'));
+    const event = WagerTransactionProcessed.from(tx, ctx('evt-1'));
     expect(Object.isFrozen(event.data)).toBe(true);
   });
 });
@@ -85,7 +85,7 @@ describe('IntegrationEvent — envelope', () => {
 describe('WagerTransactionProcessed / Rejected / PendingReference', () => {
   test('cada evento exige a transação no status certo', () => {
     const pending = newTx();
-    expect(() => WagerTransactionProcessed.from(pending, brl('1.00'), ctx('e'))).toThrow(InvalidEventSourceError);
+    expect(() => WagerTransactionProcessed.from(pending, ctx('e'))).toThrow(InvalidEventSourceError);
     expect(() => WagerTransactionRejected.from(pending, ctx('e'))).toThrow(InvalidEventSourceError);
     expect(() => WagerTransactionPendingReference.from(pending, ctx('e'))).toThrow(InvalidEventSourceError);
   });

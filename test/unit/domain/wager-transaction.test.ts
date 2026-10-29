@@ -131,7 +131,8 @@ describe('WagerTransaction.opening', () => {
 describe('WagerTransaction — transições de estado', () => {
   test('PENDING → PROCESSED guarda referência e processedAt', () => {
     const tx = WagerTransaction.create(props());
-    tx.markProcessed('tx-ref', at);
+    tx.markProcessed('tx-ref', at, brl('20.00'));
+    expect(tx.balanceAfter?.toJSON().amount).toBe('20.00');
     expect(tx.status).toBe(Status.Processed);
     expect(tx.referenceTransactionId).toBe('tx-ref');
     expect(tx.processedAt).toEqual(at);
@@ -155,7 +156,7 @@ describe('WagerTransaction — transições de estado', () => {
     tx.markPendingReference();
     expect(tx.status).toBe(Status.PendingReference);
     expect(tx.isTerminal()).toBe(false);
-    tx.markProcessed('tx-bet-1', at);
+    tx.markProcessed('tx-bet-1', at, brl('100.00'));
     expect(tx.status).toBe(Status.Processed);
   });
 
@@ -175,7 +176,7 @@ describe('WagerTransaction — transições de estado', () => {
   // Toda combinação de (estado terminal) x (transição) precisa lançar erro e não mudar nada.
   const terminalStatuses = [Status.Processed, Status.Rejected, Status.Failed];
   const transitions: Record<string, (tx: WagerTransaction) => void> = {
-    markProcessed: (tx) => tx.markProcessed(undefined, at),
+    markProcessed: (tx) => tx.markProcessed(undefined, at, brl('1.00')),
     markPendingReference: (tx) => tx.markPendingReference(),
     reject: (tx) => tx.reject(FailureCode.InsufficientFunds),
     fail: (tx) => tx.fail(FailureCode.ProcessingError),

@@ -1,6 +1,6 @@
 import { InvalidEventSourceError } from '../errors';
 import type { FailureCode } from '../failure-code';
-import type { Money, MoneyProps } from '../money';
+import type { MoneyProps } from '../money';
 import { type WagerTransaction, type WagerTransactionKind, WagerTransactionStatus } from '../wager-transaction';
 import { type EventContext, IntegrationEvent } from './integration-event';
 
@@ -53,7 +53,7 @@ export class WagerTransactionProcessed extends IntegrationEvent<WagerTransaction
   readonly eventType = 'WagerTransactionProcessed';
   readonly version = 1;
 
-  static from(tx: WagerTransaction, balance: Money, ctx: EventContext): WagerTransactionProcessed {
+  static from(tx: WagerTransaction, ctx: EventContext): WagerTransactionProcessed {
     assertStatus(tx, WagerTransactionStatus.Processed, 'WagerTransactionProcessed');
     return new WagerTransactionProcessed({
       ...ctx,
@@ -61,7 +61,7 @@ export class WagerTransactionProcessed extends IntegrationEvent<WagerTransaction
       data: {
         ...baseData(tx),
         referenceTransactionId: tx.referenceTransactionId ?? null,
-        balance: balance.toJSON(),
+        balance: tx.balanceAfter!.toJSON(),
         processedAt: tx.processedAt!.toISOString(),
       },
     });

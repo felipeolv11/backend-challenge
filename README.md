@@ -71,6 +71,16 @@ Status HTTP: 200 processada · 202 aguardando referência · 400 payload inváli
 idempotência · 422 rejeitada por regra de negócio (`failureCode` no corpo) · 503 falha transitória
 (reenviar com a mesma key). Detalhes em [`ARCHITECTURE.md`](ARCHITECTURE.md#8-taxonomia-de-failurecode-e-mapeamento-de-status-http).
 
+### Sistema inteiro no Docker (3 instâncias)
+
+Sem precisar do Bun instalado: sobe PostgreSQL, SQS, migrations e **3 instâncias** da aplicação
+(portas 3000, 3001 e 3002), todas consumindo a mesma fila e usando o mesmo banco.
+
+```bash
+bun run stack:up      # ou: docker compose --profile app up -d --build --scale app=3
+bun run stack:down
+```
+
 ## Comandos
 
 | Comando | O que faz |
@@ -85,7 +95,8 @@ idempotência · 422 rejeitada por regra de negócio (`failureCode` no corpo) ·
 | `bun run typecheck` | Checagem de tipos (TypeScript estrito) |
 | `bun test` | Roda todos os testes (precisa de `infra:up`) |
 | `bun run test:unit` | Só os testes unitários (não precisa de Docker) |
-| `bun run test:integration` | Só os testes de integração (PostgreSQL real) |
+| `bun run test:integration` | Só os testes de integração (PostgreSQL e SQS reais, incluindo 3 processos e queda com kill -9) |
+| `bun run stack:up` / `stack:down` | Sistema inteiro no Docker com 3 instâncias |
 
 > Os testes de integração usam o PostgreSQL do Docker Compose, num banco separado (`wagering_test`),
 > criado automaticamente e recriado do zero a cada arquivo de teste. O banco de desenvolvimento não é tocado.

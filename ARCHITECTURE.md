@@ -654,5 +654,39 @@ financeira, concorrência e idempotência. O **ponto de extensão** está no có
 **Alternativa descartada agora:** integrar o Keycloak. Consumiria boa parte do prazo em algo que
 não pontua.
 
-## 11. Limitações conhecidas
+## 11. Estratégia de testes
+
+Todos os testes de integração usam **PostgreSQL e SQS (MiniStack) reais**; nenhum mock de banco ou
+fila. Todo teste de integração e concorrência termina conferindo a invariante
+`wallet.balance == saldo reconstruído pelo ledger` (`expectWalletMatchesLedger`). As proteções mais
+importantes também foram validadas por **testes de mutação** (remover a proteção e ver o teste falhar).
+
+| Seção 13 | Onde |
+|---|---|
+| Unidade: `Money`, `Wallet`, regras de BET/WIN/LOSS/REFUND/ROLLBACK, conflito de moeda, idempotência | `test/unit/domain/` |
+| Migrations e constraints | `test/integration/database/schema.test.ts` (SQL direto contra o banco, incluindo down/up e backfill) |
+| Atomicidade entre wallet, ledger, inbox e outbox | `test/integration/application/process-wager-transaction.test.ts` |
+| Inbox e redelivery; retry e DLQ | `test/integration/messaging/sqs-consumer.test.ts` |
+| Publishers concorrentes sobre a mesma outbox | `test/integration/messaging/outbox-publisher.test.ts` |
+| Recuperação após reinicialização | `test/integration/multi-instance/multi-instance.test.ts` |
+| **Concorrência 1:** mesma aposta 50x em paralelo | `concurrency/same-wallet.test.ts` e `multi-instance.test.ts` (espalhada por 3 processos) |
+| **Concorrência 2:** saldo 100, duas apostas de 80 | `concurrency/same-wallet.test.ts` (repetido 10x) |
+| **Concorrência 3:** wallets distintas em paralelo | `concurrency/same-wallet.test.ts` |
+| **Concorrência 4:** ≥ 3 processos simultâneos | `multi-instance.test.ts`: 3 processos `bun run src/main.ts`, HTTP + fila, com duplicatas |
+| **Concorrência 5:** worker morto depois do commit e antes do ack | `sqs-consumer.test.ts` (redelivery real após o visibility timeout) |
+| **Concorrência 6:** dois publishers sobre a mesma outbox | `outbox-publisher.test.ts` |
+| **Concorrência 7:** ROLLBACK/REFUND antes da referência | `pending-reference-worker.test.ts` e `multi-instance.test.ts` |
+| **Concorrência 8:** reinício do serviço com consistência final | `multi-instance.test.ts`: **kill -9** de uma instância e depois de todas, no meio de 410 mensagens; 3 instâncias novas concluem tudo |
+| API HTTP, status e observabilidade | `test/integration/http/` |
+| Fluxo completo com os workers ligados | `test/integration/e2e/full-flow.test.ts` |
+
+**Teste de queda (item 8), em números típicos:** o serviço cai com ~110 de 410 transações gravadas.
+As instâncias novas concluem as ~300 restantes, e no fim: cada mensagem virou **exatamente uma**
+transação e um registro de inbox, os saldos batem com o ledger, os REFUNDs pendentes atravessaram a
+queda e foram processados, e **todo evento confirmado no banco chegou à fila de eventos**.
+
+**Docker Compose com várias instâncias:** `bun run stack:up` sobe infraestrutura + migrations +
+3 instâncias da aplicação (portas 3000 a 3002), usando o `Dockerfile` (imagem do Bun, sem build).
+
+## 12. Limitações conhecidas
 _(a definir)_

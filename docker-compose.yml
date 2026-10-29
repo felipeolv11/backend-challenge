@@ -41,5 +41,39 @@ services:
         condition: service_healthy
     restart: "no"
 
+  # ---------------------------------------------------------------- perfil "app" (opcional)
+  # Sobe o sistema inteiro, inclusive várias instâncias da aplicação:
+  #   docker compose --profile app up -d --build --scale app=3
+  # Sem o perfil, o Compose sobe só a infraestrutura (fluxo de desenvolvimento: bun run start).
+
+  # Serviço de uma execução só: aplica as migrations antes de a aplicação subir.
+  migrate:
+    profiles: ["app"]
+    build: .
+    environment:
+      DATABASE_URL: postgresql://wagering:wagering@postgres:5432/wagering
+    command: ["bun", "run", "src/infrastructure/database/migrate.ts", "up"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    profiles: ["app"]
+    build: .
+    environment:
+      DATABASE_URL: postgresql://wagering:wagering@postgres:5432/wagering
+      SQS_ENDPOINT: http://sqs:4566
+      PORT: "3000"
+    # Faixa de portas: com --scale app=3, cada instância ganha uma (3000, 3001, 3002).
+    ports:
+      - "3000-3002:3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      sqs-setup:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
 volumes:
   postgres-data:
